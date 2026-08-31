@@ -126,6 +126,19 @@ by digest), so it colocates with either host without coupling to it.
   The netboot path *is* the reinstall path — there is no separate installer,
   which keeps stormcos's "no installer" stance intact.
 
+## OpenShift/Metal3 alignment
+
+Provisioning semantics track OpenShift's Metal3/BMO model so the concepts
+map: a BareMetalHost-shaped rustkube resource (BMC + credential Secret, boot
+MAC, `online`, image) is the trigger; the operator sets ForcePXE over
+IPMI/Redfish and power-cycles; the host lands on this boot chain. In that
+mapping stormnetboot's initramfs plays ironic-python-agent (it can report
+hardware inventory for the inspecting phase), the sbregistry golden plays the
+image, and zeroboot flow-over plays the deploy step. The Go bmh-operator's
+`POST /boot-complete` → set-boot-disk flow has a natural storm equivalent:
+**assimilation-complete is the boot-complete signal**, at which point the
+host flips to persistent local boot.
+
 ## Console integration
 
 stormconsole is pluggable: every domain contributes its own components through
@@ -152,9 +165,12 @@ watchable from the fleet view in real time.
 - Whether `stormblock` grows a `boot-nvme` orchestrator mirroring
   `boot_iscsi.rs`, or `BootLocal` learns an `nvme-tcp://` slab source — engine
   work, tracked as stormblock issues, not patched here.
-- Exact split with `pxe-operator`: it owns host/boot resources in rustkube and
-  DHCP programming; stormnetboot-server serves the assets. Whether clone
-  claims happen operator-side or server-side needs settling before phase 3.
+- Exact split with `pxe-operator` and `bmh-operator-rs`: today the Go
+  bmh-operator does PXE serving and IPMI in one process; the target split is
+  boot resources + DHCP (pxe-operator), BMC/power (bmh-operator-rs, deferred
+  until core cutover — and Rust IPMI is greenfield), assets (this project).
+  Whether clone claims happen operator-side or server-side needs settling
+  before phase 3.
 
 ## Building
 

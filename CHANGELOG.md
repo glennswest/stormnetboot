@@ -18,6 +18,11 @@
 - **docs:** Console integration: stormview component feed from
   stormnetboot-server (netboot phases, assimilation progress, boot pallet
   versions, clone claims) rendered as a stormconsole panel; new phase 8.
+- **docs:** OpenShift/Metal3 alignment section (BMH resource → ForcePXE →
+  this chain; initramfs ≈ IPA, golden ≈ image, flow-over ≈ deploy,
+  assimilation-complete ≈ boot-complete); operator split clarified against
+  the live Go bmh-operator and the deferred bmh-operator-rs stub; appliance
+  VM detail (impulse1 data volume, hosts IPMI/BMH layer and updates).
 - **docs:** Hosting decision: Rose ruled out (capacity + security posture);
   interim appliance is a stormblock VM on pve.g8.lo; stormbastion is the
   target host for the boot chain. Storage-tiering section replaced by

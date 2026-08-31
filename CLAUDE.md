@@ -29,11 +29,19 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
 - Transport decision: stormblock's own NVMe/TCP initiator (`nvme-tcp://`
   backing device) + ublk export, not kernel nvme_tcp + nvme-cli. Flow-over
   needs stormblock in the datapath; uniform `/dev/ublkb0` root in every phase.
-- Hosting (decided 2026-08-31): interim appliance is a stormblock VM on
-  `pve.g8.lo`; target host is `stormbastion` (bastion + asset store + boot/
-  update tools on stormcos). **Rose is out** — insufficient capacity and,
-  decisively, not a secure-environment fit. The 240 TB unit takes the bulk
-  role when it powers up.
+- Hosting (decided 2026-08-31): interim appliance is a **storage appliance VM
+  on `pve.g8.lo`** — data volume on the spinning `impulse1` store — hosting
+  the engine, sbregistry, this boot chain, the new IPMI/BMH layer, and
+  serving updates. Target host is `stormbastion` (same roles as a stormcos
+  profile). **Rose is out** — insufficient capacity and, decisively, not a
+  secure-environment fit. The 240 TB unit takes the bulk role when it powers
+  up. A public version of the appliance is the long-term goal.
+- Provisioning aligns with OpenShift/Metal3 (BMH resource → ForcePXE →
+  power-cycle → this chain); initramfs ≈ ironic-python-agent, golden ≈
+  image, flow-over ≈ deploy, assimilation-complete ≈ boot-complete →
+  persistent local boot. No Rust IPMI/Redfish exists in-tree yet;
+  bmh-operator-rs is a deferred stub — the Go bmh-operator keeps serving
+  until core cutover.
 - Engine gaps go to stormblock as GitHub issues (e.g. `boot-nvme` orchestrator
   or an `nvme-tcp://` slab source for `BootLocal`).
 - **Orchestrator is rustkube (+ rustkube-node) over fastetcd, never mkube —
