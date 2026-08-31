@@ -9,4 +9,5 @@
   disk; same service for upgrades and recovery; storage tiering between bulk
   appliance and Rose edge.
 - **docs:** Project CLAUDE.md with work plan (phases 0–7) and context notes.
+- **docs:** Cross-link stormupgrade as the fleet upgrade policy layer.
 - **chore:** Repository created.
