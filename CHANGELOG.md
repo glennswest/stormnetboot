@@ -18,5 +18,9 @@
 - **docs:** Console integration: stormview component feed from
   stormnetboot-server (netboot phases, assimilation progress, boot pallet
   versions, clone claims) rendered as a stormconsole panel; new phase 8.
+- **docs:** Hosting decision: Rose ruled out (capacity + security posture);
+  interim appliance is a stormblock VM on pve.g8.lo; stormbastion is the
+  target host for the boot chain. Storage-tiering section replaced by
+  Hosting.
 - **docs:** Cross-link stormupgrade as the fleet upgrade policy layer.
 - **chore:** Repository created.

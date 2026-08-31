@@ -29,9 +29,11 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
 - Transport decision: stormblock's own NVMe/TCP initiator (`nvme-tcp://`
   backing device) + ublk export, not kernel nvme_tcp + nvme-cli. Flow-over
   needs stormblock in the datapath; uniform `/dev/ublkb0` root in every phase.
-- Storage tiering: bulk appliance (240 TB unit) holds goldens/clones; Rose
-  (RouterOS stormblock, storage-limited) may host only the tiny boot-chain
-  assets.
+- Hosting (decided 2026-08-31): interim appliance is a stormblock VM on
+  `pve.g8.lo`; target host is `stormbastion` (bastion + asset store + boot/
+  update tools on stormcos). **Rose is out** — insufficient capacity and,
+  decisively, not a secure-environment fit. The 240 TB unit takes the bulk
+  role when it powers up.
 - Engine gaps go to stormblock as GitHub issues (e.g. `boot-nvme` orchestrator
   or an `nvme-tcp://` slab source for `BootLocal`).
 - **Orchestrator is rustkube (+ rustkube-node) over fastetcd, never mkube —
@@ -78,7 +80,7 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
 - [ ] Phase 6 — upgrade path: pull-publish-activate-reboot loop with
       `tries_left`/rollback; prove netboot-as-recovery on a wiped node
 - [ ] Phase 7 — stormcos hosting: container build, rustkube/stormpump
-      manifests, Rose edge deployment of the boot-chain tier
+      manifests, deployment onto the PVE appliance VM, then stormbastion
 - [ ] Phase 8 — console integration: stormview component feed from
       stormnetboot-server (netboot phases, assimilation progress, boot pallet
       versions, clone claims) aggregated by stormconsole

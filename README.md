@@ -100,19 +100,20 @@ initiator + nvme-cli:
 
 Kernel `nvme_tcp` stays in the initramfs as a debug/fallback path.
 
-## Storage tiering
+## Hosting
 
-Two classes of stormblock server participate:
+- **Appliance (interim)**: a stormblock VM on `pve.g8.lo` acts as the
+  appliance — goldens, per-host CoW root clones over NVMe/TCP, the source the
+  flow-over drains from — until the 240 TB unit comes up.
+- **`stormbastion` (target)**: a hardened bastion + asset host running
+  stormcos, consolidating stormblock, sbregistry, stormnetboot-server, and the
+  upgrade content source behind one audited front. See the stormbastion repo.
+- **Rose is explicitly out.** A RouterOS container host has neither the
+  capacity nor the security posture this chain needs; nothing in the boot path
+  may depend on it.
 
-- **Bulk appliance** (e.g. the 240 TB unit): holds goldens, serves the per-host
-  CoW root clones over NVMe/TCP, and is the source the flow-over drains from.
-- **Rose / RouterOS stormblock** (storage-limited): can host the *boot chain*
-  at the network edge — iPXE binaries, boot pallet projection — because that
-  footprint is megabytes, not terabytes. It never holds goldens or clones.
-
-The tiering falls out of the design: stormnetboot-server is tiny and stateless
-(it projects pallets it fetches by digest), so it runs anywhere, while the data
-plane stays on the appliance with the capacity.
+stormnetboot-server stays tiny and stateless (it projects pallets it fetches
+by digest), so it colocates with either host without coupling to it.
 
 ## Upgrades and recovery — the same service
 
