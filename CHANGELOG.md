@@ -9,5 +9,10 @@
   disk; same service for upgrades and recovery; storage tiering between bulk
   appliance and Rose edge.
 - **docs:** Project CLAUDE.md with work plan (phases 0–7) and context notes.
+- **docs:** Correct orchestrator: rustkube (+ rustkube-node) everywhere,
+  never mkube — including Rose. All mkube references translated.
+- **docs:** Console integration: stormview component feed from
+  stormnetboot-server (netboot phases, assimilation progress, boot pallet
+  versions, clone claims) rendered as a stormconsole panel; new phase 8.
 - **docs:** Cross-link stormupgrade as the fleet upgrade policy layer.
 - **chore:** Repository created.

@@ -24,6 +24,8 @@ component running on a stormcos node, projecting signed pallets over HTTP/TFTP.
 | `ipxe` (fork) | Provides `ipxe.efi`, `snponly.efi`, `undionly.kpxe` with the HTTP read-ahead patches. stormnetboot serves these for chainload. |
 | `pxemanager` | The legacy Go monolith this rewrite retires. |
 | `stormupgrade` | The fleet upgrade operator on stormcos. Uses this project as its recovery path and the same pallet channels for content. |
+| `rustkube` | The orchestrator (with rustkube-node). Schedules the boot-chain components; mkube is not used anywhere, including Rose. |
+| `stormconsole` / `stormview` | The StormCOS console. stormnetboot ships a stormview component feed so netboot state shows up as its own console panel. |
 
 stormblock documented a `serve-boot` HTTP surface (`docs/stormblock-ipxe-boot.md`)
 but never implemented it, and its own guidance says PXE is not the engine's job.
@@ -64,7 +66,7 @@ background after that.
 ## Components (Rust workspace)
 
 1. **`stormnetboot-server`** — the boot asset service, hosted on stormcos
-   (container under stormpump/mkube):
+   (container under stormpump, scheduled by rustkube):
    - TFTP for firmware chainload only (`undionly.kpxe`, `ipxe.efi`,
      `snponly.efi`); everything after that is HTTP. UEFI HTTP boot skips TFTP
      entirely where firmware supports it.
@@ -122,6 +124,23 @@ plane stays on the appliance with the capacity.
   The netboot path *is* the reinstall path — there is no separate installer,
   which keeps stormcos's "no installer" stance intact.
 
+## Console integration
+
+stormconsole is pluggable: every domain contributes its own components through
+the stormview contract, aggregated at `/api/v1/components` (+
+`/ws/components`). `stormnetboot-server` publishes a stormview feed so the
+console gets a netboot panel with no console-side code:
+
+- Hosts currently netbooting, with phase — chainload → kernel fetch →
+  NVMe/TCP attach → `switch_root` → assimilating → local.
+- Assimilation progress per host (flow-over extents migrated, mirror state).
+- The active signed boot pallet (version, digest, signature state) and which
+  hosts booted from which pallet version.
+- Clone claims outstanding against sbregistry, and TFTP/HTTP fetch activity.
+
+Live updates ride the same feed, so a rack of machines PXE-booting is
+watchable from the fleet view in real time.
+
 ## Open questions
 
 - Boot pallet source of truth: sbregistry OCI artifact (recommended) with the
@@ -131,7 +150,7 @@ plane stays on the appliance with the capacity.
 - Whether `stormblock` grows a `boot-nvme` orchestrator mirroring
   `boot_iscsi.rs`, or `BootLocal` learns an `nvme-tcp://` slab source — engine
   work, tracked as stormblock issues, not patched here.
-- mkube `BootConfig` integration vs microdns-only host records.
+- Host records as a rustkube resource vs microdns-only.
 
 ## Building
 

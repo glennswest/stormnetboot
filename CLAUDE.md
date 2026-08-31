@@ -34,12 +34,18 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
   assets.
 - Engine gaps go to stormblock as GitHub issues (e.g. `boot-nvme` orchestrator
   or an `nvme-tcp://` slab source for `BootLocal`).
+- **Orchestrator is rustkube (+ rustkube-node), never mkube — even on Rose.**
+  Older sibling docs that say "mkube" are legacy vocabulary; translate, don't
+  follow.
+- Console integration goes through the stormview contract: stormconsole
+  aggregates every domain's components at `/api/v1/components` +
+  `/ws/components`; stormnetboot-server publishes its own feed.
 
 ## Build & deploy
 
 - Build on `root@dev.g8.lo` only; `CARGO_TARGET_DIR=/build/cargo/stormnetboot`.
-- Container images: podman, `scratch` base, pushed to the mkube-local registry
-  (see global MikroTik Rose rules when targeting Rose).
+- Container images: podman, `scratch` base, pushed to the local registry
+  (sbregistry).
 - Never write disk images to `/tmp` on dev — use `/build/images`.
 
 ## Work plan
@@ -61,8 +67,11 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
       status reporting
 - [ ] Phase 6 — upgrade path: pull-publish-activate-reboot loop with
       `tries_left`/rollback; prove netboot-as-recovery on a wiped node
-- [ ] Phase 7 — stormcos hosting: container build, mkube/stormpump manifests,
-      Rose edge deployment of the boot-chain tier
+- [ ] Phase 7 — stormcos hosting: container build, rustkube/stormpump
+      manifests, Rose edge deployment of the boot-chain tier
+- [ ] Phase 8 — console integration: stormview component feed from
+      stormnetboot-server (netboot phases, assimilation progress, boot pallet
+      versions, clone claims) aggregated by stormconsole
 
 ## Session log
 
