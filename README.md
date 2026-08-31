@@ -23,6 +23,7 @@ component running on a stormcos node, projecting signed pallets over HTTP/TFTP.
 | `microdns` | DHCP. Per-reservation `next_server`, `boot_file`, `boot_file_efi`, `ipxe_boot_url` already exist — DHCP is **not** stormnetboot's job. |
 | `ipxe` (fork) | Provides `ipxe.efi`, `snponly.efi`, `undionly.kpxe` with the HTTP read-ahead patches. stormnetboot serves these for chainload. |
 | `pxemanager` | The legacy Go monolith this rewrite retires. |
+| `stormupgrade` | The fleet upgrade operator on stormcos. Uses this project as its recovery path and the same pallet channels for content. |
 
 stormblock documented a `serve-boot` HTTP surface (`docs/stormblock-ipxe-boot.md`)
 but never implemented it, and its own guidance says PXE is not the engine's job.
@@ -115,7 +116,8 @@ plane stays on the appliance with the capacity.
 - **Upgrade in place**: a running node pulls new pallets from the same
   sbregistry, publishes them to the local GPT, activates with `tries_left`,
   reboots through stormuefi. Rollback is a GPT attribute write, never a data
-  write.
+  write. Fleet-level policy (channels, waves, health gates) is `stormupgrade`,
+  the operator project designed alongside this one.
 - **Recovery**: a node that cannot boot locally re-PXEs and re-assimilates.
   The netboot path *is* the reinstall path — there is no separate installer,
   which keeps stormcos's "no installer" stance intact.
