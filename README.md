@@ -131,13 +131,34 @@ by digest), so it colocates with either host without coupling to it.
 Provisioning semantics track OpenShift's Metal3/BMO model so the concepts
 map: a BareMetalHost-shaped rustkube resource (BMC + credential Secret, boot
 MAC, `online`, image) is the trigger; the operator sets ForcePXE over
-IPMI/Redfish and power-cycles; the host lands on this boot chain. In that
-mapping stormnetboot's initramfs plays ironic-python-agent (it can report
-hardware inventory for the inspecting phase), the sbregistry golden plays the
-image, and zeroboot flow-over plays the deploy step. The Go bmh-operator's
-`POST /boot-complete` → set-boot-disk flow has a natural storm equivalent:
-**assimilation-complete is the boot-complete signal**, at which point the
-host flips to persistent local boot.
+IPMI/Redfish and power-cycles; the host lands on this boot chain.
+
+The deliberate divergence: **no agent ramdisk, no inspection boot.** Ironic
+boots ironic-python-agent to inspect, then boots again to deploy. Here the
+netbooted OS *is* full stormcos on a network root — the deploy artifact and
+the running system are the same thing — and zeroboot flow-over is the deploy
+step, running while the node does real work. Inspection is a report from
+running stormcos: first boot posts hardware inventory to the host's
+BMH-shaped resource, so the inspecting phase costs no extra reboot cycle.
+The Go bmh-operator's `POST /boot-complete` → set-boot-disk flow keeps its
+storm equivalent: **assimilation-complete is the boot-complete signal**, at
+which point the host flips to persistent local boot.
+
+## Fleet birth and day 2
+
+The single-node path is the fleet path. N servers — 3, 6, 10, 10 000 —
+power on, PXE, and each claims its own thin CoW clone of the one stormcos
+golden: appliance-side cost per node is metadata, not a copy. Flow-over then
+drains each root to local disk in the background at whatever pace the
+appliance can serve. Day 1 ends with N *identified*, standalone stormcos
+nodes booting locally — identity (MAC/serial → name → role) is pinned in
+the host records at PXE time.
+
+Day 2 is cluster join, and it is deliberately not an install step: a node's
+role is its boot.d `start` lines, so joining is applying a profile — start
+rustkube-node everywhere, plus the control-plane units on the chosen
+masters — driven from the identity established on day 1. Promotion later is
+more `start` lines, never a reprovision.
 
 ## Console integration
 
@@ -165,6 +186,10 @@ watchable from the fleet view in real time.
 - Whether `stormblock` grows a `boot-nvme` orchestrator mirroring
   `boot_iscsi.rs`, or `BootLocal` learns an `nvme-tcp://` slab source — engine
   work, tracked as stormblock issues, not patched here.
+- Boot-storm behavior at scale: flow-over pacing when hundreds of nodes
+  assimilate at once (appliance-side throttle vs plan-side waves), and
+  horizontal fan-out of stormnetboot-server (stateless, so replicas are
+  cheap — but TFTP/DHCP hinting needs a story per segment).
 - Exact split with `pxe-operator` and `bmh-operator-rs`: today the Go
   bmh-operator does PXE serving and IPMI in one process; the target split is
   boot resources + DHCP (pxe-operator), BMC/power (bmh-operator-rs, deferred

@@ -37,11 +37,17 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
   secure-environment fit. The 240 TB unit takes the bulk role when it powers
   up. A public version of the appliance is the long-term goal.
 - Provisioning aligns with OpenShift/Metal3 (BMH resource → ForcePXE →
-  power-cycle → this chain); initramfs ≈ ironic-python-agent, golden ≈
-  image, flow-over ≈ deploy, assimilation-complete ≈ boot-complete →
-  persistent local boot. No Rust IPMI/Redfish exists in-tree yet;
-  bmh-operator-rs is a deferred stub — the Go bmh-operator keeps serving
-  until core cutover.
+  power-cycle → this chain), with one deliberate divergence: **no agent
+  ramdisk, no inspection boot** — the netboot boots full stormcos, and
+  inspection is a hardware-inventory report from the running OS on first
+  boot. golden ≈ image, flow-over ≈ deploy, assimilation-complete ≈
+  boot-complete → persistent local boot. No Rust IPMI/Redfish exists
+  in-tree yet; bmh-operator-rs is a deferred stub — the Go bmh-operator
+  keeps serving until core cutover.
+- Fleet model: N nodes (3 → 10 000) each claim a thin CoW clone of one
+  golden (metadata cost, not copies), assimilate in the background, and end
+  day 1 as identified standalone stormcos nodes. Day 2 cluster join = apply
+  a boot.d profile from the day-1 identity; never a reprovision.
 - Engine gaps go to stormblock as GitHub issues (e.g. `boot-nvme` orchestrator
   or an `nvme-tcp://` slab source for `BootLocal`).
 - **Orchestrator is rustkube (+ rustkube-node) over fastetcd, never mkube —

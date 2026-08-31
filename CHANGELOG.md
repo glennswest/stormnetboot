@@ -19,10 +19,15 @@
   stormnetboot-server (netboot phases, assimilation progress, boot pallet
   versions, clone claims) rendered as a stormconsole panel; new phase 8.
 - **docs:** OpenShift/Metal3 alignment section (BMH resource → ForcePXE →
-  this chain; initramfs ≈ IPA, golden ≈ image, flow-over ≈ deploy,
-  assimilation-complete ≈ boot-complete); operator split clarified against
-  the live Go bmh-operator and the deferred bmh-operator-rs stub; appliance
-  VM detail (impulse1 data volume, hosts IPMI/BMH layer and updates).
+  this chain; golden ≈ image, flow-over ≈ deploy, assimilation-complete ≈
+  boot-complete); operator split clarified against the live Go bmh-operator
+  and the deferred bmh-operator-rs stub; appliance VM detail (impulse1 data
+  volume, hosts IPMI/BMH layer and updates).
+- **docs:** Drop the inspection cycle: no agent ramdisk — the netboot boots
+  full stormcos and inspection is a hardware report from the running node.
+  New "Fleet birth and day 2" section: N nodes (3 → 10 000) as thin CoW
+  clones of one golden; day-2 cluster join = boot.d profile on identified
+  nodes, never a reprovision. Boot-storm pacing added to open questions.
 - **docs:** Hosting decision: Rose ruled out (capacity + security posture);
   interim appliance is a stormblock VM on pve.g8.lo; stormbastion is the
   target host for the boot chain. Storage-tiering section replaced by
