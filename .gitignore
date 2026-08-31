@@ -1,0 +1,25 @@
+# Secrets and environment
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Rust
+target/
+Cargo.lock.orig
+
+# IDE and OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs and temp
+*.log
+tmp/
+temp/
