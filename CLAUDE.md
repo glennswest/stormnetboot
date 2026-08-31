@@ -34,9 +34,19 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
   assets.
 - Engine gaps go to stormblock as GitHub issues (e.g. `boot-nvme` orchestrator
   or an `nvme-tcp://` slab source for `BootLocal`).
-- **Orchestrator is rustkube (+ rustkube-node), never mkube — even on Rose.**
+- **Orchestrator is rustkube (+ rustkube-node) over fastetcd, never mkube —
+  even on Rose.** mkube formally retired 2026-08-27 (`mkube/CLAUDE.md:190`;
+  governing spec `rustkube/enhancements/rose-node-and-mkube-migration.md`).
   Older sibling docs that say "mkube" are legacy vocabulary; translate, don't
   follow.
+- `pxe-operator` (sibling repo, skeleton) is the control-plane half of the
+  same PXE rewrite — rustkube host/boot resources + microdns programming.
+  Reconcile scope with it before phase 3 (clone claims: operator-side vs
+  server-side).
+- Platform update philosophy: no poll-and-apply updaters; images become
+  sealed goldens in sbregistry and land as CoW clone swaps. stormnetboot's
+  boot-pallet projection must follow the same rule — serve by digest from the
+  active pallet, never "latest".
 - Console integration goes through the stormview contract: stormconsole
   aggregates every domain's components at `/api/v1/components` +
   `/ws/components`; stormnetboot-server publishes its own feed.

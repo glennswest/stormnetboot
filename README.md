@@ -24,7 +24,8 @@ component running on a stormcos node, projecting signed pallets over HTTP/TFTP.
 | `ipxe` (fork) | Provides `ipxe.efi`, `snponly.efi`, `undionly.kpxe` with the HTTP read-ahead patches. stormnetboot serves these for chainload. |
 | `pxemanager` | The legacy Go monolith this rewrite retires. |
 | `stormupgrade` | The fleet upgrade operator on stormcos. Uses this project as its recovery path and the same pallet channels for content. |
-| `rustkube` | The orchestrator (with rustkube-node). Schedules the boot-chain components; mkube is not used anywhere, including Rose. |
+| `rustkube` | The orchestrator (with rustkube-node), over fastetcd. Schedules the boot-chain components; mkube is retired (2026-08-27) and appears nowhere. |
+| `pxe-operator` | The control-plane side of the PXE rewrite (rustkube watcher, skeleton today): reconciles host/boot resources, programs microdns `next_server`/boot files. stormnetboot-server is the data plane it points firmware at. |
 | `stormconsole` / `stormview` | The StormCOS console. stormnetboot ships a stormview component feed so netboot state shows up as its own console panel. |
 
 stormblock documented a `serve-boot` HTTP surface (`docs/stormblock-ipxe-boot.md`)
@@ -150,7 +151,9 @@ watchable from the fleet view in real time.
 - Whether `stormblock` grows a `boot-nvme` orchestrator mirroring
   `boot_iscsi.rs`, or `BootLocal` learns an `nvme-tcp://` slab source — engine
   work, tracked as stormblock issues, not patched here.
-- Host records as a rustkube resource vs microdns-only.
+- Exact split with `pxe-operator`: it owns host/boot resources in rustkube and
+  DHCP programming; stormnetboot-server serves the assets. Whether clone
+  claims happen operator-side or server-side needs settling before phase 3.
 
 ## Building
 
