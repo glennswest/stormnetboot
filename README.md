@@ -102,9 +102,20 @@ Kernel `nvme_tcp` stays in the initramfs as a debug/fallback path.
 
 ## Hosting
 
-- **Appliance (interim)**: a stormblock VM on `pve.g8.lo` acts as the
-  appliance — goldens, per-host CoW root clones over NVMe/TCP, the source the
-  flow-over drains from — until the 240 TB unit comes up.
+The appliances form their **own independent cluster** — separate from every
+workload cluster they provision. That separation is what makes the boot tier
+ordinary: inside the appliance cluster, the boot and asset services are
+plain Kubernetes Services (ClusterIP/LoadBalancer, EndpointSlices, DNS,
+Gateway/Route where wanted — all of which rustkube already serves), so
+load balancing, failover, and rollout of the boot tier are solved by the
+platform instead of by bespoke code here. It also means the thing that
+provisions a cluster never depends on that cluster being up.
+
+- **Appliance cluster (interim: one member)**: a stormblock VM on
+  `pve.g8.lo` — goldens, per-host CoW root clones over NVMe/TCP, the source
+  the flow-over drains from — until the 240 TB unit comes up. Adding members
+  later is the same operation as adding any node, and the services in front
+  of them do not change.
 - **`stormbastion` (target)**: a hardened bastion + asset host running
   stormcos, consolidating stormblock, sbregistry, stormnetboot-server, and the
   upgrade content source behind one audited front. See the stormbastion repo.
@@ -160,6 +171,36 @@ rustkube-node everywhere, plus the control-plane units on the chosen
 masters — driven from the identity established on day 1. Promotion later is
 more `start` lines, never a reprovision.
 
+### Boot storms don't happen
+
+Several properties stack up so that scale never funnels through one server:
+
+- **Thousands means many networks.** Fleets that size are spread across
+  segments, each with its own DHCP scope and boot tier — microdns already
+  runs per network. The unit of boot load is the segment, not the fleet.
+- **Any node can serve.** Every assimilated stormcos node runs stormblock
+  and can carry the boot tier — the server is a stateless pallet projection,
+  so promoting a node to boot-server is a boot.d `start` line. The install
+  capacity grows with the installed fleet.
+- **HTTP ISO boot is a second front door.** The same image machinery emits
+  ISOs (`stormblock image build --format iso`), so hosts can HTTP-boot an
+  ISO instead of the PXE/TFTP path — useful for firmware without clean PXE,
+  for BMC virtual-media, and as another way to spread load.
+- **The boot tier load-balances.** Stateless servers behind one boot URL
+  across a cluster of serving nodes; per-host state (claims, identity) lives
+  in rustkube/sbregistry, not in the server. In the appliance cluster this
+  is just a Service with several endpoints.
+- **Only the first hop is a file transfer.** What firmware pulls over
+  TFTP/HTTP is a few megabytes — iPXE, kernel, initramfs — and that is the
+  whole PXE payload. Everything after it arrives over NVMe/TCP as blocks,
+  demand-paged into a running system rather than downloaded up front, so the
+  bytes that would be a "storm" in an image-push model never traverse the
+  boot path at all.
+- **Assets replicate.** Goldens are stormblock volumes, so they mirror
+  across appliance-cluster members (and toward a segment) the same way any
+  volume does. A node attaches to a replica near it; adding a replica adds
+  serving capacity without changing what any client is configured to do.
+
 ## Console integration
 
 stormconsole is pluggable: every domain contributes its own components through
@@ -186,10 +227,13 @@ watchable from the fleet view in real time.
 - Whether `stormblock` grows a `boot-nvme` orchestrator mirroring
   `boot_iscsi.rs`, or `BootLocal` learns an `nvme-tcp://` slab source — engine
   work, tracked as stormblock issues, not patched here.
-- Boot-storm behavior at scale: flow-over pacing when hundreds of nodes
-  assimilate at once (appliance-side throttle vs plan-side waves), and
-  horizontal fan-out of stormnetboot-server (stateless, so replicas are
-  cheap — but TFTP/DHCP hinting needs a story per segment).
+- Flow-over pacing when many nodes on one segment assimilate from the same
+  appliance at once: appliance-side throttle vs plan-side waves.
+- Boot-serving promotion: what marks a node as a boot server (a boot.d
+  profile bit, a rustkube resource, or automatic per-segment election).
+- Replica placement policy: how many golden replicas per segment, who
+  decides, and how a booting host is steered to a near one (DNS, Service
+  topology hints, or an explicit portal in the rendered cmdline).
 - Exact split with `pxe-operator` and `bmh-operator-rs`: today the Go
   bmh-operator does PXE serving and IPMI in one process; the target split is
   boot resources + DHCP (pxe-operator), BMC/power (bmh-operator-rs, deferred

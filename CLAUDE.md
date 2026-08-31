@@ -29,6 +29,17 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
 - Transport decision: stormblock's own NVMe/TCP initiator (`nvme-tcp://`
   backing device) + ublk export, not kernel nvme_tcp + nvme-cli. Flow-over
   needs stormblock in the datapath; uniform `/dev/ublkb0` root in every phase.
+- **Appliances are their own independent cluster**, separate from the
+  workload clusters they provision; boot/asset services are ordinary
+  Kubernetes Services there (load balancing, failover, DNS from the
+  platform, not from this code), and the provisioner never depends on the
+  cluster it provisions.
+- Scale story: thousands of nodes span many networks (per-network microdns);
+  any assimilated node can serve the boot tier (stateless, a boot.d `start`
+  line); HTTP ISO boot is a second front door; goldens replicate as
+  stormblock volumes so serving capacity is added by adding replicas. Only
+  the first hop (iPXE/kernel/initramfs, a few MB) is a file transfer —
+  everything else is demand-paged blocks over NVMe/TCP.
 - Hosting (decided 2026-08-31): interim appliance is a **storage appliance VM
   on `pve.g8.lo`** — data volume on the spinning `impulse1` store — hosting
   the engine, sbregistry, this boot chain, the new IPMI/BMH layer, and

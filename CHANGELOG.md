@@ -23,6 +23,11 @@
   boot-complete); operator split clarified against the live Go bmh-operator
   and the deferred bmh-operator-rs stub; appliance VM detail (impulse1 data
   volume, hosts IPMI/BMH layer and updates).
+- **docs:** Appliances run as an independent cluster; boot/asset services
+  become ordinary Kubernetes Services (LB/failover/DNS from rustkube).
+  Boot-storm section: many networks, any node can serve, HTTP ISO boot,
+  load-balanced stateless boot tier, replicated goldens, and only the
+  first few-MB hop as a file transfer — the rest demand-paged over NVMe/TCP.
 - **docs:** Drop the inspection cycle: no agent ramdisk — the netboot boots
   full stormcos and inspection is a hardware report from the running node.
   New "Fleet birth and day 2" section: N nodes (3 → 10 000) as thin CoW
