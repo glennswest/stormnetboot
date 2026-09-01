@@ -14,8 +14,8 @@ pub struct Metrics {
     pub boot_script_requests: AtomicU64,
     pub asset_requests: AtomicU64,
     pub not_found: AtomicU64,
-    /// Boot requests refused: unknown host under a deny policy, or a MAC we
-    /// could not parse.
+    /// Boot requests refused: unknown host under a deny policy, a host whose
+    /// record parks it with `online: false`, or a MAC we could not parse.
     pub refused: AtomicU64,
     pub claim_failures: AtomicU64,
     /// Successful boot pallet refreshes that changed what we serve.
@@ -71,7 +71,7 @@ impl Metrics {
             ),
             (
                 "stormnetboot_refused_total",
-                "Boot requests refused (unknown host, or unparseable MAC).",
+                "Boot requests refused (unknown host, host marked offline, or unparseable MAC).",
                 load(&self.refused),
             ),
             (

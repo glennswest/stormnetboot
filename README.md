@@ -368,24 +368,91 @@ the active signed boot pallet; the machine that pulls them comes up as full
 stormcos with root over NVMe/TCP, then flow-over assimilates it to local
 disk.
 
-Wiring status, honestly — today only the first row is built:
+Wiring status, honestly — everything below is built; none of it has met real
+hardware or a live apiserver yet:
 
 | Integration | Mechanism | State |
 |---|---|---|
 | Serve assets | directory on disk | **done** (v0.1.0) |
-| Assets from pallets | sbregistry `:5100`, verify STORMSIG, serve by digest | phase 2 |
-| Per-host identity | MAC → host record → `/v1/clones/claim` → `rd.stormblock.*` | phase 3 |
-| The booted node | `stormnetboot-init` → stormblock `nvme-tcp://` → `/dev/ublkb0` → `switch_root` | phase 4 |
-| Hosting on stormcos | boot.d unit + rustkube Service | phase 7 |
+| Assets from pallets | sbregistry `:5100`, verify STORMSIG, serve by digest | **done** (v0.2.0) |
+| Per-host identity | MAC → host record → `/v1/clones/claim` → `rd.stormblock.*` | **done** (v0.2.0) |
+| The booted node | `stormnetboot-init` → stormblock `nvme-tcp://` → `/dev/ublkb0` → `switch_root` | **done** (v0.2.0) |
+| Hosting on stormcos | boot.d unit + rustkube Service | **done** (v0.2.0) |
+| Host records | `BootHost` watch over kube-rs, hosts file underneath | **done** (v0.3.0) |
+| Reporting back | `BootHost` status: phase, claim, conditions, hardware | **done** (v0.3.0) |
+
+## Where host records come from
+
+Two layers, and the order matters. A `BootHost` resource in the cluster is the
+source of truth; the JSON hosts file is the bootstrap layer beneath it,
+consulted only for MACs no `BootHost` covers.
+
+That order is what lets one appliance boot the machines that will *become* its
+cluster and then keep serving from that cluster — no cutover, no second code
+path, and no file quietly overriding what an operator changed with `kubectl`.
+Deleting a `BootHost` falls back to the file rather than to nothing, which is
+the behaviour a bootstrap needs and the one a fleet expects.
+
+```bash
+kubectl apply -f deploy/manifests/20-boothost-crd.yaml     # or:
+stormnetboot-server --print-crd | kubectl apply -f -       # generated from the types
+```
+
+`--print-crd` emits the CRD from the Rust types the server actually serves, so
+the schema an operator installs cannot disagree with the code that answers to
+it. The YAML in `deploy/manifests` is the same contract, with the comments.
+
+```yaml
+apiVersion: netboot.storm.io/v1alpha1
+kind: BootHost
+metadata:
+  name: node7
+  namespace: storm-system
+spec:
+  bootMACAddress: "aa:bb:cc:dd:ee:01"
+  role: worker
+  online: true
+```
+
+The server reads them and writes back what happened, on the status
+subresource — phase, pallet version, the sbregistry clone the host is booting
+from, the hardware the node reported about itself, and the standard
+`Available` / `Progressing` / `Degraded` conditions with reasons, messages,
+`observedGeneration`, and transition times that move only when the status
+moves.
+
+```
+$ kubectl get boothosts -A
+NAMESPACE      NAME    MAC                 HOSTNAME  ROLE    PHASE          PALLET  AGE
+storm-system   node7   aa:bb:cc:dd:ee:01   node7     worker  assimilating   10.20   14m
+```
+
+The write-back is level-triggered and capped at 200 patches a pass: ten
+thousand machines racked at once converge over a few seconds rather than
+arriving at the apiserver as one burst. None of it is on the boot path — an
+unreachable cluster costs the fleet its `kubectl get bh` view and nothing
+else, because the records are already in memory and the file is still
+underneath.
+
+`spec.online: false` parks a machine without deleting the identity it has been
+given: the boot server refuses it with a 403 and an iPXE comment saying why. A
+host pulled for repair has to come back as itself, so the record outlives the
+outage.
+
+**Inventory instead of inspection.** There is no agent ramdisk and no second
+reboot. The node is already running the OS it will keep, so `stormnetboot-agent`
+reads its own `/proc` and `/sys` and POSTs the result to `/api/v1/inventory`,
+which lands in `status.hardware`. Ironic's inspection boot, replaced by a file
+read.
 
 ## Status
 
-**v0.2.0 — all phases implemented, not yet run against real hardware.** Three
-binaries, 83 tests:
+**v0.3.0 — all phases implemented, not yet run against real hardware or a live
+apiserver.** Three binaries, 115 tests:
 
 | Crate | What it is | Size |
 |---|---|---|
-| `stormnetboot-server` | The boot service: pallet projection, claims, both HTTP surfaces | 9.1 MB |
+| `stormnetboot-server` | The boot service: pallet projection, claims, `BootHost` records and status, both HTTP surfaces | 9.1 MB |
 | `stormnetboot-init` | Initramfs PID 1: NVMe/TCP root → `switch_root` | 439 KB |
 | `stormnetboot-agent` | Reports running/assimilating/local, plus inventory | 439 KB |
 
@@ -398,14 +465,19 @@ stormnetboot-server \
   --pallet-repo stormcos/boot --pallet-ref 10.20 \
   --trusted-key <ed25519-public-key-hex> \
   --golden stormcos --claim \
+  --kube --kube-namespace storm-system \
   --hosts-file /var/lib/stormnetboot/hosts.json \
   --local-disk /dev/sda
 ```
 
+Built without the `kubernetes` feature there is no API client in the binary at
+all, and `--hosts-file` is the whole story — which is what an air-gapped site
+or a first bootstrap actually wants.
+
 Every flag has a `STORMNETBOOT_*` environment variable, so the same binary runs
 from a shell, a boot.d spec, or a container with no config file.
 
-Four refusals are deliberate, and each has a test:
+Five refusals are deliberate, and each has a test:
 
 - `/readyz` returns 503 listing what is missing until the kernel and initramfs
   are actually present. A boot server that answers but cannot deliver a kernel
@@ -418,11 +490,12 @@ Four refusals are deliberate, and each has a test:
   the wrong volume is not.
 - `--unknown-hosts deny` refuses a machine with no record, for sites where the
   boot network is not trusted to contain only machines that belong there.
+- A host whose record says `online: false` is refused by name. Parking a
+  machine must not mean deleting the identity it has to come back as.
 
 The next step is a real one rather than more code: publish a boot pallet and
-run a machine through the whole chain on the appliance VM. Host records also
-still come from a file — the `BootHost` CRD is shipped in `deploy/manifests`
-and wiring it up via kube-rs is the first follow-up.
+run a machine through the whole chain on the appliance VM, against a live
+rustkube apiserver.
 
 ## Building
 

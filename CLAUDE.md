@@ -7,7 +7,7 @@ architecture; this file tracks state and the work plan.
 
 ## Version
 
-`0.2.0`, set once in the workspace `Cargo.toml` (`workspace.package.version`);
+`0.3.0`, set once in the workspace `Cargo.toml` (`workspace.package.version`);
 all three crates inherit it with `version.workspace = true`, so there is one
 place to change.
 
@@ -155,14 +155,23 @@ place to change.
       initramfs build script.
 - [x] Phase 8 — console integration (2026-09-01): stormview component feed at
       `/api/v1/components` + `/ws/components` on the management port.
-- [ ] Phase 9 — BootHost CRD as the host record source (in progress):
-      kube-rs watch feeding the host store (file store stays as the bootstrap
-      layer, consulted only where the cluster has no record), status
-      write-back with standard conditions, hardware inventory reported by the
-      running node into `status.hardware`, RBAC and a ServiceAccount in the
-      manifests, `--print-crd` so the shipped CRD cannot drift from the types.
+- [x] Phase 9 — BootHost CRD as the host record source (2026-09-01): kube-rs
+      watch feeding the cluster layer of the host store, with the file store
+      underneath as the bootstrap layer (consulted only where no BootHost
+      covers the MAC, so deleting one falls back rather than to nothing);
+      level-triggered status write-back with Available/Progressing/Degraded,
+      observedGeneration and transition times that move only when the status
+      does, capped at 200 patches a pass; `spec.online: false` parks a machine
+      without deleting its identity; hardware inventory posted by the running
+      node into `status.hardware`; ServiceAccount + ClusterRole (read
+      BootHosts, write only their status); `--print-crd` generates the CRD
+      from the types the server serves. Behind the default `kubernetes`
+      feature, so a bootstrap or air-gapped build carries no API client.
 - [ ] Next — publish a real boot pallet and run a machine through the whole
-      chain on the appliance VM.
+      chain on the appliance VM, against a live rustkube apiserver. Nothing in
+      phase 9 has met a real apiserver yet: no cluster was reachable from the
+      build box, so the watch and the status writer are covered by unit tests
+      and a loopback smoke test only.
 
 ## Session log
 

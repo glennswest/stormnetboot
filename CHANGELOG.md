@@ -2,7 +2,58 @@
 
 ## [Unreleased]
 
-### 2026-09-01 — v0.2.0
+## [v0.3.0] — 2026-09-01
+
+### Added
+- **`BootHost` resources are the host record source.** A kube-rs watch keeps
+  the cluster layer of the host store current, replacing the whole set on
+  every relist so a delete missed during a disconnect heals itself. The JSON
+  hosts file stays underneath as the bootstrap layer, consulted only for MACs
+  no `BootHost` covers — which is what lets one appliance boot the machines
+  that will become its own cluster and then keep serving from that cluster,
+  with no cutover and no file quietly overriding a `kubectl` edit. Deleting a
+  `BootHost` falls back to the file rather than to nothing.
+- **Status write-back**, level-triggered: phase, pallet version, the
+  sbregistry claim the host is booting from, reported hardware, and the
+  standard `Available` / `Progressing` / `Degraded` conditions with reasons,
+  messages, `observedGeneration`, and `lastTransitionTime` that moves only
+  when the status moves. Passes are capped at 200 patches so ten thousand
+  machines racked at once converge over a few seconds instead of hitting the
+  apiserver in one burst, and nothing about it is on the boot path: an
+  unreachable cluster costs the fleet its `kubectl get bh` view and nothing
+  else.
+- **`--print-crd`** emits the CRD from the Rust types the server actually
+  serves, so an installed schema cannot disagree with the code answering to
+  it. The `bootMACAddress` pattern is now in the schema as well as the parser:
+  a MAC the apiserver accepted and the boot server cannot match is a machine
+  that silently never boots.
+- **`spec.online: false` parks a machine** without deleting the identity it
+  has been given — refused with a 403 and an iPXE comment naming the host. A
+  machine pulled for repair has to come back as itself.
+- **Hardware inventory into `status.hardware`.** `stormnetboot-agent` posts
+  structured inventory to a new `/api/v1/inventory`, and the boot state and
+  console feed carry it. This is the whole of "inspection": a running node
+  reading its own `/proc` and `/sys`, not an agent ramdisk and a second boot.
+- `GET /api/v1/hosts` on the management surface lists the resolved records and
+  the count in each layer; `stormnetboot_host_records{source=...}` and
+  `stormnetboot_boothost_synced` expose the same thing to Prometheus, so a
+  cluster layer that empties out while the file layer still answers is
+  visible rather than silent. New counters for status writes, status write
+  failures and watch errors.
+- ServiceAccount, ClusterRole and ClusterRoleBinding in `deploy/manifests`.
+  The server may read every `BootHost` and write only their status: which
+  machines exist and what they should be is an operator's statement, and a
+  boot server able to rewrite that could re-identify a machine mid-install.
+
+### Changed
+- The Kubernetes client sits behind a default-on `kubernetes` cargo feature.
+  Built without it there is no API client in the binary at all, which is what
+  a first bootstrap or an air-gapped site actually wants.
+- `Phase` grew a `slug()`, and the console feed, the metric labels and the
+  `BootHost` status now share it. One host in one phase must not read three
+  ways depending on where an operator looked.
+
+## [v0.2.0] — 2026-09-01
 
 - **feat:** Multi-slab boot. `rd.stormblock.slab=` now takes a comma-separated
   list (mapping to the engine's already-repeatable `--slab`), and
