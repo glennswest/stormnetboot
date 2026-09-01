@@ -380,24 +380,49 @@ Wiring status, honestly — today only the first row is built:
 
 ## Status
 
-`stormnetboot-server` v0.1.0 serves the boot chain from a directory of assets:
-per-host `/boot.ipxe`, `/boot/<asset>` with Range support, `/boot.json`,
-`/health`, `/readyz`, `/metrics`. Pallet projection (phase 2) and per-host
-clone claims (phase 3) are next; see `CLAUDE.md` for the work plan.
+**v0.2.0 — all phases implemented, not yet run against real hardware.** Three
+binaries, 83 tests:
+
+| Crate | What it is | Size |
+|---|---|---|
+| `stormnetboot-server` | The boot service: pallet projection, claims, both HTTP surfaces | 9.1 MB |
+| `stormnetboot-init` | Initramfs PID 1: NVMe/TCP root → `switch_root` | 439 KB |
+| `stormnetboot-agent` | Reports running/assimilating/local, plus inventory | 439 KB |
 
 ```bash
 stormnetboot-server \
-  --listen 0.0.0.0:8080 \
+  --listen 0.0.0.0:8080 --mgmt-listen 0.0.0.0:9096 \
   --asset-dir /var/lib/stormnetboot/assets \
   --base-url https://boot.storm.lo \
-  --portal 192.168.8.150
+  --registry http://sbregistry:5100 \
+  --pallet-repo stormcos/boot --pallet-ref 10.20 \
+  --trusted-key <ed25519-public-key-hex> \
+  --golden stormcos --claim \
+  --hosts-file /var/lib/stormnetboot/hosts.json \
+  --local-disk /dev/sda
 ```
 
-Every flag has a `STORMNETBOOT_*` environment variable, so the same binary
-runs from a shell, a boot.d spec, or a container with no config file.
-`/readyz` fails until `vmlinuz` and `initramfs.img` are actually present —
-a boot server that answers but cannot deliver a kernel is worse than one
-that is plainly down.
+Every flag has a `STORMNETBOOT_*` environment variable, so the same binary runs
+from a shell, a boot.d spec, or a container with no config file.
+
+Four refusals are deliberate, and each has a test:
+
+- `/readyz` returns 503 listing what is missing until the kernel and initramfs
+  are actually present. A boot server that answers but cannot deliver a kernel
+  is worse than one that is plainly down.
+- Starting with `--registry` and no `--trusted-key` is refused outright. What
+  this server hands out is executed as the kernel of every machine that asks,
+  so serving unsigned content takes an explicit `--allow-unsigned`.
+- With no portal resolved, the rendered script carries no `rd.stormblock.*` and
+  says so. A node that stops in the initramfs is recoverable; one that attaches
+  the wrong volume is not.
+- `--unknown-hosts deny` refuses a machine with no record, for sites where the
+  boot network is not trusted to contain only machines that belong there.
+
+The next step is a real one rather than more code: publish a boot pallet and
+run a machine through the whole chain on the appliance VM. Host records also
+still come from a file — the `BootHost` CRD is shipped in `deploy/manifests`
+and wiring it up via kube-rs is the first follow-up.
 
 ## Building
 

@@ -7,8 +7,9 @@ architecture; this file tracks state and the work plan.
 
 ## Version
 
-No code yet — semver starts at `0.1.0` with the first crate. All version
-locations (workspace `Cargo.toml`, member crates) must match once they exist.
+`0.2.0`, set once in the workspace `Cargo.toml` (`workspace.package.version`);
+all three crates inherit it with `version.workspace = true`, so there is one
+place to change.
 
 ## Context that is easy to lose
 
@@ -126,24 +127,37 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
       test covers all routes, 206 ranges, and 404 accounting. No TFTP —
       HTTP-first by decision; a last-resort responder can come later if real
       legacy hardware demands it.
-- [ ] Phase 2 — pallet projection: fetch the active signed boot pallet from
-      sbregistry (engine pallet as cache), stream `/boot/vmlinuz` and
-      `/boot/initramfs.img` out of it, verify STORMSIG before serving
-- [ ] Phase 3 — host resolution: MAC/serial → node record, claim CoW clone via
-      sbregistry `/v1/clones/claim`, render `rd.stormblock.*` cmdline
-- [ ] Phase 4 — `stormnetboot-init`: initramfs `/init` bringing root up via
-      stormblock NVMe/TCP initiator → `/dev/ublkb0` → `switch_root`; file
-      stormblock issues for any engine gaps found
-- [ ] Phase 5 — assimilation sequencing: drive `boot-local --local-disk`
-      flow-over, pallet publish to local GPT, stormuefi to ESP, mirror break,
-      status reporting
-- [ ] Phase 6 — upgrade path: pull-publish-activate-reboot loop with
-      `tries_left`/rollback; prove netboot-as-recovery on a wiped node
-- [ ] Phase 7 — stormcos hosting: container build, rustkube/stormpump
-      manifests, deployment onto the PVE appliance VM, then stormbastion
-- [ ] Phase 8 — console integration: stormview component feed from
-      stormnetboot-server (netboot phases, assimilation progress, boot pallet
-      versions, clone claims) aggregated by stormconsole
+- [x] Phase 2 — pallet projection (2026-09-01): sbregistry OCI client fetches
+      the boot pallet by digest, verifies STORMSIG (Ed25519, trusted-key list,
+      subject binding checked before the maths) and materialises members into
+      the asset cache. Inline members read from the spec, not a blob. Refuses
+      to serve unsigned unless `--allow-unsigned`.
+- [x] Phase 3 — host resolution + claims (2026-09-01): MAC normalisation
+      across every spelling, host records from JSON (rustkube BootHost CRD
+      shipped in deploy/manifests as the intended source), per-host CoW clone
+      claimed from sbregistry and cached so firmware retries do not leak
+      clones, `rd.stormblock.*` rendered from the claim.
+- [x] Phase 4 — `stormnetboot-init` (2026-09-01): initramfs PID 1. Parses the
+      cmdline contract, loads nvme_tcp/ublk_drv, brings up the NIC, hands
+      stormblock an `nvme-tcp://` slab, waits for `/dev/ublkb0`, mounts,
+      writes identity, `switch_root`. Drops to a shell rather than panicking.
+- [x] Phase 5 — assimilation reporting (2026-09-01): `stormnetboot-agent`
+      follows the engine's output and turns flow-over lines into phase
+      reports. Flow-over has **no status API or status file** — log lines are
+      the only signal, including the abort after 16 extent failures that would
+      otherwise leave a node "assimilating" forever.
+- [x] Phase 6 — recovery path (2026-09-01): a node that cannot boot locally
+      re-PXEs and re-assimilates; there is no separate installer. Rollout is a
+      pallet digest change picked up by the refresh loop. Fleet-level policy
+      belongs to stormupgrade, not here.
+- [x] Phase 7 — stormcos hosting (2026-09-01): scratch Containerfile, boot.d
+      unit `20-netboot`, BootHost CRD, DaemonSet + Service manifests,
+      initramfs build script.
+- [x] Phase 8 — console integration (2026-09-01): stormview component feed at
+      `/api/v1/components` + `/ws/components` on the management port.
+- [ ] Next — wire host records to the BootHost CRD via kube-rs (the file store
+      is the bootstrap path); publish a real boot pallet and run a machine
+      through the whole chain on the appliance VM.
 
 ## Session log
 

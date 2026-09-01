@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### 2026-09-01 — v0.2.0
+
+- **feat:** Pallet projection. `stormnetboot-server` fetches the boot pallet
+  from sbregistry by digest, verifies its STORMSIG signature (Ed25519, trusted
+  key list, subject binding checked before the signature maths so a valid
+  signature over a different artifact cannot be replayed), and materialises
+  members into the asset cache. Inline members are read from the pallet spec
+  rather than fetched as blobs, which they are not. Serving an unsigned pallet
+  requires `--allow-unsigned`.
+- **feat:** Host identity and per-host claims. MAC normalisation across every
+  spelling (colons, dashes, dotted quads, bare hex, PXE `BOOTIF`); host records
+  from JSON with a `BootHost` CRD shipped as the intended source; a per-host
+  CoW clone claimed from sbregistry and cached so firmware retries reuse a
+  claim instead of leaking clones.
+- **feat:** `stormnetboot-init` — initramfs PID 1. Parses the cmdline contract,
+  loads `nvme_tcp`/`ublk_drv`, brings up the NIC, hands stormblock an
+  `nvme-tcp://` slab, waits for `/dev/ublkb0`, mounts root, writes the pinned
+  identity, and `switch_root`s. Drops to a shell rather than panicking the
+  kernel, and reports each step to the boot server.
+- **feat:** `stormnetboot-agent` — reports the phases nothing else can see.
+  Follows the engine's output to turn flow-over into `assimilating` and
+  `local`, because flow-over has no status API or status file. Reports
+  hardware inventory from the running node, which is what removes the need for
+  an inspection boot.
+- **feat:** Two HTTP surfaces. The firmware-facing boot surface (`:8080`) and
+  the management surface (`:9096`, console feed, metrics, host admin) are
+  separate listeners on separate ports, verified to 404 each other's routes.
+- **feat:** stormview component feed at `/api/v1/components` and
+  `/ws/components`, with health rolled up onto a `system` component.
+- **feat:** Deployment: scratch Containerfile, `20-netboot` boot.d unit,
+  `BootHost` CRD with printer columns and conditions, DaemonSet + Service
+  manifests, and an initramfs build script that refuses to produce an image
+  missing `nvme_tcp` or `ublk_drv`.
+- **docs:** Capacity section with measured numbers and a wiring table
+  separating what is built from what is planned.
+
 ### 2026-09-01
 - **docs:** Capacity section with measured numbers (194-227 hosts/s, 58 MB RSS at 500 concurrent; wire-bound at ~76 hosts/s on 10 GbE) and an explicit "how it wires into stormcos" table separating what is built from what is planned.
 - **feat:** `stormnetboot-server` v0.1.0 — Rust/axum boot asset service:
