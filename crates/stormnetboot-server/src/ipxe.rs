@@ -95,6 +95,6 @@ mod tests {
     #[test]
     fn extra_cmdline_is_appended() {
         let script = render(&cfg(&["--portal", "10.0.0.5", "--extra-cmdline", "console=ttyS0"]), None);
-        assert!(script.contains("rd.stormblock.portal=10.0.0.5 console=ttyS0"));
+        assert!(script.contains("root=/dev/ublkb0 console=ttyS0"));
     }
 }
