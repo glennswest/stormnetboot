@@ -1,0 +1,119 @@
+# BootHost — which machine boots what, and as whom.
+#
+# Shaped after Metal3's BareMetalHost so an OpenShift operator recognises it,
+# but scoped to the boot chain: BMC control belongs to bmh-operator-rs, and
+# this resource carries only what stormnetboot needs to answer a PXE request.
+#
+# Identity is pinned here, before the machine has an OS to decide it with,
+# which is what makes day-2 join a profile change rather than a reprovision.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: boothosts.netboot.storm.io
+  annotations:
+    addonmanager.kubernetes.io/mode: Reconcile
+spec:
+  group: netboot.storm.io
+  scope: Namespaced
+  names:
+    plural: boothosts
+    singular: boothost
+    kind: BootHost
+    shortNames: ["bh"]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["bootMACAddress"]
+              properties:
+                bootMACAddress:
+                  type: string
+                  description: MAC that PXE boots. The host's identity.
+                  pattern: '^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$'
+                hostname:
+                  type: string
+                  description: Name this machine takes, for the rest of its life.
+                role:
+                  type: string
+                  description: Day-2 profile to apply when it joins a cluster.
+                stack:
+                  type: string
+                  description: >-
+                    Loadout to boot, e.g. stormcos:10.20. Defaults to the
+                    server's golden when unset.
+                portal:
+                  type: string
+                  description: >-
+                    NVMe/TCP portal override, to steer this host at a nearer
+                    appliance replica than the default.
+                extraCmdline:
+                  type: string
+                online:
+                  type: boolean
+                  default: true
+                  description: Whether this host is allowed to boot.
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: >-
+                    Where the host is: script-fetched, assets-fetched,
+                    root-attached, running, assimilating, local, failed.
+                palletVersion:
+                  type: string
+                claimId:
+                  type: string
+                  description: sbregistry clone claimed for this host's root.
+                hardware:
+                  type: object
+                  description: >-
+                    Inventory reported by the running node. There is no
+                    inspection boot; the machine describes itself once it is up.
+                  properties:
+                    cpus: {type: integer}
+                    memoryKB: {type: integer}
+                    product: {type: string}
+                    serial: {type: string}
+                    disks:
+                      type: array
+                      items: {type: string}
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required: ["type", "status"]
+                    properties:
+                      type: {type: string}
+                      status: {type: string}
+                      reason: {type: string}
+                      message: {type: string}
+                      lastTransitionTime: {type: string}
+                      observedGeneration: {type: integer}
+      additionalPrinterColumns:
+        - name: MAC
+          type: string
+          jsonPath: .spec.bootMACAddress
+        - name: Hostname
+          type: string
+          jsonPath: .spec.hostname
+        - name: Role
+          type: string
+          jsonPath: .spec.role
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Pallet
+          type: string
+          jsonPath: .status.palletVersion
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp

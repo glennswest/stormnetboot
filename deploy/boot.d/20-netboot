@@ -1,0 +1,34 @@
+# stormnetboot — the boot chain, served from the appliance cluster.
+#
+# Defined here; whether it is *started* is the profile's decision. An appliance
+# node starts it; a worker carries the golden and does not.
+#
+# Like every storm service golden, PID 1 of the container is stormd, which
+# supervises the binary, restarts it on the policy in its config and probes it.
+# So `argv` is /stormd, and what it runs is the config inside the golden.
+#
+# `share uts` so the syslog HOSTNAME is the node rather than the container:
+# several appliance members serving boot must not collapse into one row.
+#
+# `profile host` because firmware talks to this directly — the boot surface has
+# to be on the network the machines PXE from, not behind a routed profile.
+
+volume  netboot      /pallets/stormnetboot
+volume  netbootdata  /data/stormnetboot
+volume  netbootlogs  /logs/stormnetboot
+spec    stormnetboot
+  domain    container
+  root      netboot
+  profile   host
+  share     uts
+  mount     netbootdata /var/lib/stormnetboot
+  mount     netbootlogs /var/log/stormd
+  logs      combined
+  # The registry is local to the appliance cluster; the base URL is the
+  # Service name clients resolve, never this node's address.
+  env       STORMNETBOOT_REGISTRY=http://127.0.0.1:5100
+  env       STORMNETBOOT_BASE_URL=http://boot.storm.lo:8080
+  env       STORMNETBOOT_ASSET_DIR=/var/lib/stormnetboot/assets
+  env       STORMNETBOOT_HOSTS_FILE=/var/lib/stormnetboot/hosts.json
+  argv      /stormd
+start   stormnetboot

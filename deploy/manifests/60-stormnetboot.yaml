@@ -1,0 +1,107 @@
+# stormnetboot-server on the appliance cluster.
+#
+# hostNetwork, because firmware talks to the boot surface directly: a machine
+# that only knows how to PXE cannot reach a ClusterIP. The Service exists so
+# management and the console reach it by name, and so the boot URL survives a
+# member being replaced.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: stormnetboot
+  namespace: storm-system
+  labels:
+    app: stormnetboot
+  annotations:
+    addonmanager.kubernetes.io/mode: Reconcile
+spec:
+  selector:
+    matchLabels:
+      app: stormnetboot
+  template:
+    metadata:
+      labels:
+        app: stormnetboot
+    spec:
+      priorityClassName: system-node-critical
+      # Only appliance members serve boot; a worker carries the golden and
+      # does not run it.
+      nodeSelector:
+        storm.io/appliance: "true"
+      hostNetwork: true
+      containers:
+        - name: stormnetboot
+          image: stormnetboot
+          # `command` is required, not optional: a golden carries no OCI image
+          # config, so there is no Entrypoint for argv[0] to come from.
+          command: ["/stormnetboot-server"]
+          env:
+            - name: STORMNETBOOT_LISTEN
+              value: "0.0.0.0:8080"
+            - name: STORMNETBOOT_MGMT_LISTEN
+              value: "0.0.0.0:9096"
+            - name: STORMNETBOOT_REGISTRY
+              value: http://sbregistry.storm-system:5100
+            - name: STORMNETBOOT_BASE_URL
+              value: http://boot.storm.lo:8080
+            - name: STORMNETBOOT_ASSET_DIR
+              value: /var/lib/stormnetboot/assets
+            - name: STORMNETBOOT_PALLET_REPO
+              value: stormcos/boot
+            - name: STORMNETBOOT_PALLET_REF
+              value: latest
+            # Without a trusted key the server refuses to start unless
+            # --allow-unsigned is set. That refusal is the point.
+            - name: STORMNETBOOT_TRUSTED_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: stormnetboot-trust
+                  key: trusted-keys
+            - name: RUST_LOG
+              value: info
+          ports:
+            - containerPort: 8080
+              name: boot
+              protocol: TCP
+            - containerPort: 9096
+              name: mgmt
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9096
+            periodSeconds: 20
+          volumeMounts:
+            - name: assets
+              mountPath: /var/lib/stormnetboot
+      volumes:
+        - name: assets
+          hostPath:
+            path: /var/lib/stormnetboot
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stormnetboot
+  namespace: storm-system
+  labels:
+    app: stormnetboot
+  annotations:
+    addonmanager.kubernetes.io/mode: Reconcile
+spec:
+  selector:
+    app: stormnetboot
+  ports:
+    - name: boot
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+    - name: mgmt
+      port: 9096
+      targetPort: 9096
+      protocol: TCP

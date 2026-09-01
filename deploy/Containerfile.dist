@@ -1,0 +1,29 @@
+# Package an already cross-compiled binary into a scratch image.
+#
+#   cargo build --release --target x86_64-unknown-linux-musl
+#   podman build --build-arg BIN=target/x86_64-unknown-linux-musl/release/stormnetboot-server \
+#     -t stormnetboot:edge -f deploy/Containerfile.dist .
+#
+# The binary must be statically linked — `scratch` has no loader, no libc and
+# no CA bundle. musl static is what the build above produces; a glibc build
+# will not start and the failure gives no useful message.
+FROM scratch
+
+ARG BIN=target/x86_64-unknown-linux-musl/release/stormnetboot-server
+COPY ${BIN} /stormnetboot-server
+
+# The server fetches pallets from sbregistry over HTTPS in any deployment that
+# is not plain-HTTP on a trusted segment. rustls reads this bundle via
+# SSL_CERT_FILE; without it every registry fetch fails certificate validation
+# and nothing else does.
+COPY ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+# Projected boot assets. Mount a volume here or every restart re-fetches the
+# pallet before it can serve.
+VOLUME ["/var/lib/stormnetboot"]
+
+# 8080 is the firmware-facing boot surface; 9096 is management (console feed,
+# metrics). They are separate ports because they belong on separate networks.
+EXPOSE 8080 9096
+ENTRYPOINT ["/stormnetboot-server"]
