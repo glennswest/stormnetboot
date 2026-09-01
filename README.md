@@ -322,6 +322,62 @@ watchable from the fleet view in real time.
   Whether clone claims happen operator-side or server-side needs settling
   before phase 3.
 
+## Capacity
+
+The server hands each booting host **one script plus ~16 MB** (a ~12 MB
+kernel and a ~4.4 MB initramfs) and is then out of the picture: everything
+after that arrives over NVMe/TCP, and the host never talks to the boot server
+again. It is a boot-time file server, not a provisioning engine and not a
+data path.
+
+Measured on dev (8 cores, loopback, v0.1.0 — so this measures the server, not
+a network):
+
+| Load | Time | Rate |
+|---|---|---|
+| 1 host | 21 ms | — |
+| 100 concurrent | 0.52 s | 194 hosts/s, 3.2 GB/s |
+| 500 concurrent | 2.20 s | 227 hosts/s, 3.7 GB/s |
+
+RSS stayed at 58 MB serving 500 concurrent hosts, and throughput rose rather
+than collapsed as concurrency grew. Every host pulls the *same* two files, so
+they are served from page cache — roughly 16 MB of hot cache serves the whole
+fleet, which is why memory stays flat.
+
+**The wire is the bottleneck, not the server.** At 16.4 MB per host: ~7-8
+hosts/s on 1 GbE, ~76 hosts/s on 10 GbE. A 42-node rack is a few seconds of
+wire time; 1000 hosts on 10 GbE is well under a minute. And because capacity
+is added by adding serving nodes (stateless, behind a Service, any
+assimilated node can serve), the answer to "more hosts" is never a bigger
+boot server.
+
+## How it wires into stormcos
+
+Two directions, which are easy to conflate — it is stormcos serving stormcos:
+
+**It runs on stormcos.** On an appliance node it is an ordinary container in a
+boot.d unit (`20-netboot`), started by stormpump as PID 1 with its rootfs a
+golden clone, and exposed to the network as a rustkube Service. Nothing about
+it is special-cased: it is deployed, updated and rolled the same way any
+workload is, and `--base-url` is the Service name so clients never learn a
+node address. Config is all `STORMNETBOOT_*` environment variables precisely
+so a boot.d spec can set it without a config file.
+
+**It serves stormcos.** What it hands out is the kernel and initramfs from
+the active signed boot pallet; the machine that pulls them comes up as full
+stormcos with root over NVMe/TCP, then flow-over assimilates it to local
+disk.
+
+Wiring status, honestly — today only the first row is built:
+
+| Integration | Mechanism | State |
+|---|---|---|
+| Serve assets | directory on disk | **done** (v0.1.0) |
+| Assets from pallets | sbregistry `:5100`, verify STORMSIG, serve by digest | phase 2 |
+| Per-host identity | MAC → host record → `/v1/clones/claim` → `rd.stormblock.*` | phase 3 |
+| The booted node | `stormnetboot-init` → stormblock `nvme-tcp://` → `/dev/ublkb0` → `switch_root` | phase 4 |
+| Hosting on stormcos | boot.d unit + rustkube Service | phase 7 |
+
 ## Status
 
 `stormnetboot-server` v0.1.0 serves the boot chain from a directory of assets:

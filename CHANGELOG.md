@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### 2026-09-01
+- **docs:** Capacity section with measured numbers (194-227 hosts/s, 58 MB RSS at 500 concurrent; wire-bound at ~76 hosts/s on 10 GbE) and an explicit "how it wires into stormcos" table separating what is built from what is planned.
 - **feat:** `stormnetboot-server` v0.1.0 — Rust/axum boot asset service:
   per-host rendered `/boot.ipxe`, asset serving under `/boot/` with Range
   support, `/boot.json` listing, `/health`, `/readyz` gated on the kernel and
