@@ -155,9 +155,14 @@ place to change.
       initramfs build script.
 - [x] Phase 8 — console integration (2026-09-01): stormview component feed at
       `/api/v1/components` + `/ws/components` on the management port.
-- [ ] Next — wire host records to the BootHost CRD via kube-rs (the file store
-      is the bootstrap path); publish a real boot pallet and run a machine
-      through the whole chain on the appliance VM.
+- [ ] Phase 9 — BootHost CRD as the host record source (in progress):
+      kube-rs watch feeding the host store (file store stays as the bootstrap
+      layer, consulted only where the cluster has no record), status
+      write-back with standard conditions, hardware inventory reported by the
+      running node into `status.hardware`, RBAC and a ServiceAccount in the
+      manifests, `--print-crd` so the shipped CRD cannot drift from the types.
+- [ ] Next — publish a real boot pallet and run a machine through the whole
+      chain on the appliance VM.
 
 ## Session log
 
