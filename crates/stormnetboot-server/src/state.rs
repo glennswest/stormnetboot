@@ -26,7 +26,7 @@ use crate::mac::Mac;
 /// These are the phases stormnetboot can actually observe: it sees the script
 /// fetch and the asset fetches directly, and learns the rest from the node
 /// reporting in once it is running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Phase {
     /// Asked for its boot script — firmware is alive and talking to us.
