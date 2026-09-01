@@ -149,24 +149,57 @@ VERSION_ID=$KVER
 EOF
 
 # --- assemble the UKI ------------------------------------------------------
-# Section addresses are computed from the actual file sizes rather than the
-# usual hardcoded constants: a kernel larger than the gap between two fixed
-# VMAs overlaps the next section, and the failure is a machine that resets
-# instantly with nothing on the console.
+# Section addresses are computed from the stub's own section table, not from
+# hardcoded constants and not from its file size. Two reasons, both of which
+# produce a machine that resets instantly with a blank console:
+#
+#   * ImageBase is not zero (0x14df90000 for systemd's stub), so a VMA derived
+#     from a file size lands *below* the image base and objcopy places the
+#     section somewhere the firmware will never look. It warns and exits 0.
+#   * A kernel larger than the gap between two fixed VMAs silently overlaps
+#     the next section.
+#
+# So: find the highest address the stub already occupies, and stack the four
+# new sections above it at SectionAlignment.
 align() { local v=$1 a=$2; echo $(( (v + a - 1) / a * a )); }
-stub_end=$(( $(stat -c%s "$STUB") ))
-osrel_vma=$(align $(( stub_end + 0x1000 )) 0x1000)
-cmdline_vma=$(align $(( osrel_vma + $(stat -c%s "$WORK/os-release") + 0x1000 )) 0x1000)
-linux_vma=$(align $(( cmdline_vma + $(stat -c%s "$WORK/cmdline.txt") + 0x1000 )) 0x200000)
-initrd_vma=$(align $(( linux_vma + $(stat -c%s "$KERNEL") + 0x1000 )) 0x200000)
 
-say "building UKI (linux @ $(printf 0x%x $linux_vma), initrd @ $(printf 0x%x $initrd_vma))"
+SECT_ALIGN=$(( 0x$(objdump -p "$STUB" | awk '/SectionAlignment/ {print $2; exit}') ))
+[[ "$SECT_ALIGN" -gt 0 ]] || SECT_ALIGN=$(( 0x1000 ))
+
+stub_end=0
+while read -r size vma; do
+    end=$(( 0x$size + 0x$vma ))
+    (( end > stub_end )) && stub_end=$end
+done < <(objdump -h "$STUB" | awk '/^ +[0-9]+ /{print $3, $4}')
+(( stub_end > 0 )) || die "could not read the section table of $STUB"
+
+osrel_vma=$(align "$stub_end" "$SECT_ALIGN")
+cmdline_vma=$(align $(( osrel_vma   + $(stat -c%s "$WORK/os-release")  )) "$SECT_ALIGN")
+linux_vma=$(align   $(( cmdline_vma + $(stat -c%s "$WORK/cmdline.txt") )) "$SECT_ALIGN")
+initrd_vma=$(align  $(( linux_vma   + $(stat -c%s "$KERNEL")           )) "$SECT_ALIGN")
+
+say "building UKI (stub ends $(printf 0x%x $stub_end), linux @ $(printf 0x%x $linux_vma), initrd @ $(printf 0x%x $initrd_vma))"
 objcopy \
     --add-section .osrel="$WORK/os-release"     --change-section-vma .osrel="$osrel_vma" \
     --add-section .cmdline="$WORK/cmdline.txt"  --change-section-vma .cmdline="$cmdline_vma" \
     --add-section .linux="$KERNEL"              --change-section-vma .linux="$linux_vma" \
     --add-section .initrd="$INITRAMFS"          --change-section-vma .initrd="$initrd_vma" \
     "$STUB" "$WORK/boot.efi"
+
+# objcopy reports "section below image base" as a *warning* and still exits 0,
+# handing back a UKI that boots to a blank screen. Check the result rather than
+# the exit status: every section must be present, non-empty, and at or above
+# the image base.
+IMAGE_BASE=$(( 0x$(objdump -p "$WORK/boot.efi" | awk '/ImageBase/ {print $2; exit}') ))
+for section in .osrel .cmdline .linux .initrd; do
+    read -r size vma < <(objdump -h "$WORK/boot.efi" \
+        | awk -v s="$section" '$2 == s {print $3, $4; exit}')
+    [[ -n "${size:-}" ]] || die "UKI is missing the $section section"
+    (( 0x$size > 0 ))    || die "UKI section $section is empty"
+    (( 0x$vma >= IMAGE_BASE )) \
+        || die "UKI section $section at 0x$vma is below the image base $(printf 0x%x $IMAGE_BASE); firmware would never find it"
+done
+say "UKI sections verified above image base $(printf 0x%x $IMAGE_BASE)"
 
 DIGEST="sha256:$(sha256sum "$WORK/boot.efi" | cut -d' ' -f1)"
 say "UKI digest $DIGEST ($(du -h "$WORK/boot.efi" | cut -f1))"
