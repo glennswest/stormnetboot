@@ -23,6 +23,15 @@
   boot-complete); operator split clarified against the live Go bmh-operator
   and the deferred bmh-operator-rs stub; appliance VM detail (impulse1 data
   volume, hosts IPMI/BMH layer and updates).
+- **docs:** HTTP-first boot: UEFI HTTP Boot and BMC virtual-media ISO as the
+  normal paths, HTTP-served iPXE for chainload, TFTP demoted to a
+  last-resort responder for legacy PXE ROMs. The appliance/storage cluster
+  serves the HTTPS itself from the nodes holding the goldens — no separate
+  web tier. Noted Redfish VirtualMedia as greenfield work.
+- **docs:** Locality section: appliances across racks/rows/floors/sites,
+  serving degrades rack → row → floor → site, reusing the existing
+  stormdrive/stormblock failure-domain labels; policy deliberately TBD and
+  configured via stormconsole.
 - **docs:** Appliances run as an independent cluster; boot/asset services
   become ordinary Kubernetes Services (LB/failover/DNS from rustkube).
   Boot-storm section: many networks, any node can serve, HTTP ISO boot,

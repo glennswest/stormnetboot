@@ -34,6 +34,25 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
   Kubernetes Services there (load balancing, failover, DNS from the
   platform, not from this code), and the provisioner never depends on the
   cluster it provisions.
+- **HTTP first; TFTP is a last resort.** The payload is small enough for
+  firmware to fetch over HTTP directly: UEFI HTTP Boot, a BMC-attached HTTP
+  ISO over Redfish/IPMI virtual media, or HTTP-served iPXE chainload. Keep a
+  minimal TFTP responder for legacy PXE ROMs only — never assume it, never
+  put it on the normal path (TFTP is UDP, per-segment, unbalanceable). Note:
+  Redfish VirtualMedia is greenfield — the Go bmh-operator does media by
+  iSCSI sanboot and has no virtual-media support.
+- **The storage/appliance cluster serves the HTTPS itself** — no separate
+  web tier. stormnetboot-server runs on the appliance nodes that already
+  hold the goldens/pallets, so serving is a local read and every member with
+  a replica can serve.
+- Locality (direction, policy TBD — expect to learn it by running it):
+  appliances spread across racks/rows/floors/sites; serving prefers the
+  nearest golden replica and degrades rack → row → floor → site. Reuse the
+  existing failure-domain labels — stormdrive owns `hba`/`shelf`/`bay` and
+  physical resolution (SES/PCIe/SAS), stormblock owns `site`/`building`/
+  `room`/`row`/`rack`/`node`/`cluster`; drives already register with
+  location labels. stormconsole is the configuration surface — don't invent
+  a config file for placement.
 - Scale story: thousands of nodes span many networks (per-network microdns);
   any assimilated node can serve the boot tier (stateless, a boot.d `start`
   line); HTTP ISO boot is a second front door; goldens replicate as

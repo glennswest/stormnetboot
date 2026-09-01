@@ -21,7 +21,7 @@ component running on a stormcos node, projecting signed pallets over HTTP/TFTP.
 | `stormcos` | The OS being booted. Kernel already validated for `NVME_TCP`, `BLK_DEV_UBLK`, `EROFS_FS`. Its architecture doc names the netboot leg as the open question — stormnetboot is that leg. |
 | `stormuefi` + `pallet-format` | The local boot chain the assimilated node ends up on (ESP → pallet select with A/B fallback). |
 | `microdns` | DHCP. Per-reservation `next_server`, `boot_file`, `boot_file_efi`, `ipxe_boot_url` already exist — DHCP is **not** stormnetboot's job. |
-| `ipxe` (fork) | Provides `ipxe.efi`, `snponly.efi`, `undionly.kpxe` with the HTTP read-ahead patches. stormnetboot serves these for chainload. |
+| `ipxe` (fork) | Optional chainload stage for machines whose firmware can't HTTP-boot on its own; the fork's HTTP read-ahead patches matter there. Served over HTTP like everything else — never TFTP. |
 | `pxemanager` | The legacy Go monolith this rewrite retires. |
 | `stormupgrade` | The fleet upgrade operator on stormcos. Uses this project as its recovery path and the same pallet channels for content. |
 | `rustkube` | The orchestrator (with rustkube-node), over fastetcd. Schedules the boot-chain components; mkube is retired (2026-08-27) and appears nowhere. |
@@ -35,11 +35,16 @@ stormnetboot implements that surface as its own component.
 ## Boot flow
 
 ```
-PXE ROM ──TFTP──▶ iPXE (snponly.efi / undionly.kpxe)
-   │
-   ├─HTTP─▶ GET /boot.ipxe?mac=...      per-host script from stormnetboot-server
-   ├─HTTP─▶ GET /boot/vmlinuz            ┐ projected from the ACTIVE signed
-   ├─HTTP─▶ GET /boot/initramfs.img      ┘ boot pallet — never baked in
+firmware ── UEFI HTTP Boot ─┐
+BMC ────── virtual media ───┤  (legacy PXE ROM → TFTP: last resort only)
+iPXE chainload (HTTP) ──────┤
+                            │
+                            ▼
+      HTTPS Service on the appliance/storage cluster
+   ├─▶ GET /boot.ipxe?mac=...       per-host script from stormnetboot-server
+   ├─▶ GET /boot/vmlinuz             ┐ projected from the ACTIVE signed
+   ├─▶ GET /boot/initramfs.img       ┘ boot pallet — never baked in
+   └─▶ GET /boot/stormcos.iso        same content as an ISO, for virtual media
    │
    ▼
 /init (stormnetboot-init, static musl)
@@ -68,9 +73,12 @@ background after that.
 
 1. **`stormnetboot-server`** — the boot asset service, hosted on stormcos
    (container under stormpump, scheduled by rustkube):
-   - TFTP for firmware chainload only (`undionly.kpxe`, `ipxe.efi`,
-     `snponly.efi`); everything after that is HTTP. UEFI HTTP boot skips TFTP
-     entirely where firmware supports it.
+   - **HTTP first; TFTP is a last resort.** The payload is small enough that
+     firmware can fetch it directly: UEFI HTTP Boot where the firmware does
+     it, BMC virtual media (an HTTP ISO over Redfish/IPMI) where it doesn't,
+     and HTTP-served iPXE to chainload in between. A minimal TFTP responder
+     exists only for machines that can do nothing else — legacy PXE ROMs —
+     and nothing in the design may assume it.
    - HTTP: `/boot/vmlinuz`, `/boot/initramfs.img` (streamed out of the active
      signed boot pallet), `/boot.ipxe?mac=...`, `/boot/` listing, `/health`,
      `/metrics`.
@@ -126,6 +134,15 @@ provisions a cluster never depends on that cluster being up.
 stormnetboot-server stays tiny and stateless (it projects pallets it fetches
 by digest), so it colocates with either host without coupling to it.
 
+**The storage cluster serves the HTTPS itself.** There is no separate web
+tier: the boot endpoint is a Service on the appliance cluster, backed by
+stormnetboot-server running on the same nodes that hold the goldens and
+pallets. The bytes are already local to the server projecting them, so
+serving is a read from local storage rather than a fetch across a tier, and
+each appliance member that holds a replica can serve it. Load balancing,
+TLS termination and locality all land on the same endpoints the platform
+already gives the cluster.
+
 ## Upgrades and recovery — the same service
 
 - **Upgrade in place**: a running node pulls new pallets from the same
@@ -171,6 +188,31 @@ rustkube-node everywhere, plus the control-plane units on the chosen
 masters — driven from the identity established on day 1. Promotion later is
 more `start` lines, never a reprovision.
 
+### Locality
+
+Appliances spread across racks, rows, floors and sites, so "where do I boot
+from" has a good answer instead of one central answer. Serving prefers the
+nearest replica and **degrades gracefully**: rack-local if there is one, else
+row, else floor, else site. A boot storm inside one rack is served inside
+that rack.
+
+This does not need a new vocabulary. The failure-domain labels already exist
+and are already split: stormdrive resolves physical location (enclosure/bay
+via SES, PCIe slot, SAS address) and owns `hba`/`shelf`/`bay`, while
+stormblock owns node-and-above — `site`, `building`, `room`, `row`, `rack`,
+`node`, `cluster` — across one hierarchy, `site ⊃ building ⊃ floor/room ⊃
+row ⊃ rack ⊃ node ⊃ hba ⊃ shelf ⊃ bay`. Drives are registered with location
+labels already, so placement policy is a consumer of facts the platform
+collects, not a new inventory to maintain.
+
+**Status: direction, not policy.** How many replicas per domain, what
+steers a booting host to a near one, and how aggressive the fallback should
+be are all open — and are the kind of thing to learn by running it across
+real racks and sites rather than deciding on paper. stormconsole is the
+configuration surface for it: the console already renders stormdrive and
+stormblock, so placement policy is a panel there, not a config file this
+project invents.
+
 ### Boot storms don't happen
 
 Several properties stack up so that scale never funnels through one server:
@@ -182,10 +224,11 @@ Several properties stack up so that scale never funnels through one server:
   and can carry the boot tier — the server is a stateless pallet projection,
   so promoting a node to boot-server is a boot.d `start` line. The install
   capacity grows with the installed fleet.
-- **HTTP ISO boot is a second front door.** The same image machinery emits
-  ISOs (`stormblock image build --format iso`), so hosts can HTTP-boot an
-  ISO instead of the PXE/TFTP path — useful for firmware without clean PXE,
-  for BMC virtual-media, and as another way to spread load.
+- **It is HTTP, so it load-balances.** The same image machinery emits ISOs
+  (`stormblock image build --format iso`), and the BMC can attach one over
+  virtual media from a load-balanced HTTPS endpoint. The normal path has no
+  TFTP in it, so it is not stuck being per-segment; the last-resort TFTP
+  responder is the only piece that ever needs to be segment-local.
 - **The boot tier load-balances.** Stateless servers behind one boot URL
   across a cluster of serving nodes; per-host state (claims, identity) lives
   in rustkube/sbregistry, not in the server. In the appliance cluster this
@@ -231,9 +274,10 @@ watchable from the fleet view in real time.
   appliance at once: appliance-side throttle vs plan-side waves.
 - Boot-serving promotion: what marks a node as a boot server (a boot.d
   profile bit, a rustkube resource, or automatic per-segment election).
-- Replica placement policy: how many golden replicas per segment, who
+- Replica placement policy: how many golden replicas per failure domain, who
   decides, and how a booting host is steered to a near one (DNS, Service
-  topology hints, or an explicit portal in the rendered cmdline).
+  topology hints, or an explicit portal in the rendered cmdline). See
+  "Locality" — the direction is settled, the policy is not.
 - Exact split with `pxe-operator` and `bmh-operator-rs`: today the Go
   bmh-operator does PXE serving and IPMI in one process; the target split is
   boot resources + DHCP (pxe-operator), BMC/power (bmh-operator-rs, deferred
