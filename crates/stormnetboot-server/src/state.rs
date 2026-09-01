@@ -17,7 +17,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::mac::Mac;
 
@@ -50,6 +50,40 @@ impl Phase {
     pub fn is_terminal(self) -> bool {
         matches!(self, Phase::Local | Phase::Failed)
     }
+
+    /// The wire spelling, shared by the JSON feed, the metric label and the
+    /// `BootHost` status — one host in one phase must not read three ways
+    /// depending on where an operator looked.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Phase::ScriptFetched => "script-fetched",
+            Phase::AssetsFetched => "assets-fetched",
+            Phase::RootAttached => "root-attached",
+            Phase::Running => "running",
+            Phase::Assimilating => "assimilating",
+            Phase::Local => "local",
+            Phase::Failed => "failed",
+        }
+    }
+}
+
+/// Hardware as the running node described itself.
+///
+/// This is what removes the inspection boot: there is no agent ramdisk and no
+/// second reboot, because the machine is already running the OS it will keep
+/// and reporting its own inventory is a file read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Inventory {
+    #[serde(default)]
+    pub cpus: u32,
+    #[serde(default)]
+    pub memory_kb: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +98,9 @@ pub struct HostState {
     /// hosts are on which version mid-rollout.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pallet_version: Option<String>,
+    /// What the node said it is made of, once it was up to say so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hardware: Option<Inventory>,
     pub first_seen_unix: u64,
     pub updated_unix: u64,
 }
@@ -121,6 +158,7 @@ impl BootState {
                 phase,
                 detail,
                 pallet_version: None,
+                hardware: None,
                 first_seen_unix: now,
                 updated_unix: now,
             });
@@ -134,6 +172,47 @@ impl BootState {
         };
         if let Some(state) = hosts.get_mut(mac) {
             state.pallet_version = Some(version.to_owned());
+        }
+    }
+
+    /// Record the inventory a running node reported about itself.
+    ///
+    /// A node can report inventory before its `running` report lands — the two
+    /// are separate requests — so this creates the entry if it has to, at the
+    /// phase that a machine able to describe itself is necessarily in.
+    pub fn set_inventory(&self, mac: &Mac, hardware: Inventory) {
+        let mut hosts = match self.hosts.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        if hosts.len() >= MAX_TRACKED && !hosts.contains_key(mac) {
+            Self::evict_finished(&mut hosts);
+        }
+
+        let now = now_unix();
+        hosts
+            .entry(mac.clone())
+            .and_modify(|state| {
+                state.hardware = Some(hardware.clone());
+                state.updated_unix = now;
+            })
+            .or_insert_with(|| HostState {
+                mac: mac.clone(),
+                phase: Phase::Running,
+                detail: None,
+                pallet_version: None,
+                hardware: Some(hardware),
+                first_seen_unix: now,
+                updated_unix: now,
+            });
+    }
+
+    /// One host, for the status writer.
+    pub fn get(&self, mac: &Mac) -> Option<HostState> {
+        match self.hosts.read() {
+            Ok(guard) => guard.get(mac).cloned(),
+            Err(poisoned) => poisoned.into_inner().get(mac).cloned(),
         }
     }
 
@@ -225,6 +304,58 @@ mod tests {
         assert!(Phase::Local.is_terminal());
         assert!(Phase::Failed.is_terminal());
         assert!(!Phase::Assimilating.is_terminal());
+    }
+
+    #[test]
+    fn inventory_arriving_first_still_creates_the_host() {
+        let state = BootState::default();
+        state.set_inventory(
+            &mac("05"),
+            Inventory {
+                cpus: 64,
+                memory_kb: 268_435_456,
+                product: Some("PowerEdge R650".into()),
+                serial: Some("ABC123".into()),
+                disks: vec!["nvme0n1".into()],
+            },
+        );
+
+        let host = state.get(&mac("05")).unwrap();
+        // Only a machine that is up can describe itself.
+        assert_eq!(host.phase, Phase::Running);
+        assert_eq!(host.hardware.unwrap().cpus, 64);
+    }
+
+    #[test]
+    fn inventory_does_not_disturb_the_phase_of_a_host_that_moved_on() {
+        let state = BootState::default();
+        state.observe(mac("06"), Phase::Assimilating, None);
+        state.set_inventory(&mac("06"), Inventory { cpus: 8, ..Default::default() });
+        assert_eq!(state.get(&mac("06")).unwrap().phase, Phase::Assimilating);
+    }
+
+    #[test]
+    fn every_phase_has_a_distinct_slug() {
+        let phases = [
+            Phase::ScriptFetched,
+            Phase::AssetsFetched,
+            Phase::RootAttached,
+            Phase::Running,
+            Phase::Assimilating,
+            Phase::Local,
+            Phase::Failed,
+        ];
+        let mut slugs: Vec<&str> = phases.iter().map(|p| p.slug()).collect();
+        slugs.sort_unstable();
+        slugs.dedup();
+        assert_eq!(slugs.len(), phases.len());
+        // The slug and the serde spelling are the same string, deliberately.
+        for phase in phases {
+            assert_eq!(
+                serde_json::to_string(&phase).unwrap(),
+                format!("\"{}\"", phase.slug())
+            );
+        }
     }
 
     #[test]

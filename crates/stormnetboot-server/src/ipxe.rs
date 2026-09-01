@@ -149,6 +149,8 @@ mod tests {
             stack: None,
             portal: None,
             extra_cmdline: None,
+            online: true,
+            object: None,
         }
     }
 

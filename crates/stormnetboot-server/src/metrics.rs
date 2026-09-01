@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::state::Phase;
+use crate::{hosts::HostCounts, state::Phase};
 
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -21,6 +21,13 @@ pub struct Metrics {
     /// Successful boot pallet refreshes that changed what we serve.
     pub pallet_refreshes: AtomicU64,
     pub pallet_refresh_failures: AtomicU64,
+    /// `BootHost` status subresource patches written.
+    pub status_writes: AtomicU64,
+    pub status_write_failures: AtomicU64,
+    /// Errors from the `BootHost` watch. The watch retries on its own, so
+    /// this rising while records stay current is noise; it rising while they
+    /// go stale is the alert.
+    pub watch_errors: AtomicU64,
 }
 
 impl Metrics {
@@ -28,7 +35,7 @@ impl Metrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn render_with_phases(&self, phases: &[(Phase, usize)]) -> String {
+    pub fn render(&self, phases: &[(Phase, usize)], hosts: HostCounts) -> String {
         let load = |c: &AtomicU64| c.load(Ordering::Relaxed);
         let mut out = String::with_capacity(1024);
 
@@ -82,6 +89,21 @@ impl Metrics {
                 "Failed attempts to refresh the boot pallet.",
                 load(&self.pallet_refresh_failures),
             ),
+            (
+                "stormnetboot_status_writes_total",
+                "BootHost status subresource patches written.",
+                load(&self.status_writes),
+            ),
+            (
+                "stormnetboot_status_write_failures_total",
+                "Failed BootHost status patches.",
+                load(&self.status_write_failures),
+            ),
+            (
+                "stormnetboot_watch_errors_total",
+                "Errors returned by the BootHost watch.",
+                load(&self.watch_errors),
+            ),
         ] {
             out.push_str(&format!(
                 "# HELP {name} {help}\n# TYPE {name} counter\n{name} {value}\n"
@@ -97,23 +119,31 @@ impl Metrics {
         for (phase, count) in phases {
             out.push_str(&format!(
                 "stormnetboot_hosts{{phase=\"{}\"}} {count}\n",
-                phase_label(*phase)
+                phase.slug()
             ));
         }
 
-        out
-    }
-}
+        // Records by layer: a cluster layer that empties out while the file
+        // layer still answers is the failure that would otherwise look like
+        // nothing at all going wrong.
+        out.push_str(concat!(
+            "# HELP stormnetboot_host_records Host records held, by source layer.\n",
+            "# TYPE stormnetboot_host_records gauge\n",
+        ));
+        out.push_str(&format!(
+            "stormnetboot_host_records{{source=\"file\"}} {}\nstormnetboot_host_records{{source=\"boothost\"}} {}\n",
+            hosts.file, hosts.kube
+        ));
+        out.push_str(concat!(
+            "# HELP stormnetboot_boothost_synced Whether the BootHost watch has listed the cluster.\n",
+            "# TYPE stormnetboot_boothost_synced gauge\n",
+        ));
+        out.push_str(&format!(
+            "stormnetboot_boothost_synced {}\n",
+            u8::from(hosts.kube_synced)
+        ));
 
-fn phase_label(phase: Phase) -> &'static str {
-    match phase {
-        Phase::ScriptFetched => "script-fetched",
-        Phase::AssetsFetched => "assets-fetched",
-        Phase::RootAttached => "root-attached",
-        Phase::Running => "running",
-        Phase::Assimilating => "assimilating",
-        Phase::Local => "local",
-        Phase::Failed => "failed",
+        out
     }
 }
 
@@ -121,18 +151,29 @@ fn phase_label(phase: Phase) -> &'static str {
 mod tests {
     use super::*;
 
+    fn counts() -> HostCounts {
+        HostCounts {
+            file: 2,
+            kube: 5,
+            total: 6,
+            kube_synced: true,
+        }
+    }
+
     #[test]
     fn renders_valid_exposition_including_phase_labels() {
         let m = Metrics::default();
         Metrics::incr(&m.requests_total);
         Metrics::incr(&m.refused);
 
-        let out = m.render_with_phases(&[(Phase::Running, 3), (Phase::Failed, 1)]);
+        let out = m.render(&[(Phase::Running, 3), (Phase::Failed, 1)], counts());
 
         assert!(out.contains("stormnetboot_requests_total 1"));
         assert!(out.contains("stormnetboot_refused_total 1"));
         assert!(out.contains("stormnetboot_hosts{phase=\"running\"} 3"));
         assert!(out.contains("stormnetboot_hosts{phase=\"failed\"} 1"));
+        assert!(out.contains("stormnetboot_host_records{source=\"boothost\"} 5"));
+        assert!(out.contains("stormnetboot_boothost_synced 1"));
 
         // Every metric must be preceded by its HELP and TYPE.
         for line in out.lines().filter(|l| !l.starts_with('#')) {
@@ -143,7 +184,7 @@ mod tests {
 
     #[test]
     fn no_phases_still_renders() {
-        let out = Metrics::default().render_with_phases(&[]);
+        let out = Metrics::default().render(&[], counts());
         assert!(out.contains("stormnetboot_build_info"));
         assert!(out.contains("# TYPE stormnetboot_hosts gauge"));
     }

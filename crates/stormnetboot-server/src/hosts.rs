@@ -4,15 +4,41 @@
 //! change rather than a reprovision: the name and role a node carries for the
 //! rest of its life are decided before it has an OS to decide them with.
 //!
-//! Records come from a file today. The intended source is a rustkube resource
-//! (see the BootHost CRD in `deploy/manifests`), and the split in this module
-//! is drawn so that swapping the backing store does not touch callers.
+//! Records come from two layers. A `BootHost` resource in the cluster is the
+//! source of truth; a JSON file is the bootstrap layer beneath it, consulted
+//! only for MACs the cluster says nothing about. That order is what lets an
+//! appliance boot the machines that will *become* its cluster, and then keep
+//! serving from the cluster once one exists — without a cutover, and without
+//! a file quietly overriding what an operator changed with `kubectl`.
 
-use std::{collections::HashMap, path::PathBuf, sync::RwLock, time::SystemTime};
+use std::{collections::HashMap, fmt, path::PathBuf, sync::RwLock, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
 use crate::mac::Mac;
+
+/// The Kubernetes object a record was read from.
+///
+/// Carried on the record so status can be written back to the right object
+/// without a second lookup, and so the status we write can name the
+/// generation of the spec it actually observed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ObjectRef {
+    pub namespace: String,
+    pub name: String,
+    #[serde(default)]
+    pub generation: i64,
+}
+
+impl fmt::Display for ObjectRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.namespace, self.name)
+    }
+}
+
+fn online_by_default() -> bool {
+    true
+}
 
 /// What a specific machine should boot, and as whom.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -34,6 +60,17 @@ pub struct HostRecord {
     /// Extra kernel command line for this host alone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_cmdline: Option<String>,
+    /// Whether this machine is allowed to boot at all.
+    ///
+    /// Default true, because a record that exists is normally a machine that
+    /// should boot. Setting it false is how a host is parked without deleting
+    /// the identity it has been given — a machine pulled for repair must come
+    /// back as itself.
+    #[serde(default = "online_by_default")]
+    pub online: bool,
+    /// The `BootHost` this record came from, when it came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<ObjectRef>,
 }
 
 /// What to do when a machine we have no record for asks to boot.
@@ -62,10 +99,26 @@ impl std::str::FromStr for UnknownHostPolicy {
 
 #[derive(Debug, Default)]
 struct Loaded {
-    records: HashMap<Mac, HostRecord>,
+    /// The bootstrap layer.
+    file: HashMap<Mac, HostRecord>,
     /// Modification time of the file these came from, so a reload is a no-op
     /// when nothing changed.
     mtime: Option<SystemTime>,
+    /// The authoritative layer: `BootHost` objects, as the watch last saw them.
+    kube: HashMap<Mac, HostRecord>,
+    /// Whether the watch has completed an initial list. Until it has, the
+    /// cluster layer being empty means "not known yet", not "no hosts".
+    kube_synced: bool,
+}
+
+/// How many records each layer holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostCounts {
+    pub file: usize,
+    pub kube: usize,
+    /// Distinct hosts across both layers.
+    pub total: usize,
+    pub kube_synced: bool,
 }
 
 /// Host record store.
@@ -127,18 +180,96 @@ impl HostStore {
         let records = list.into_iter().map(|r| (r.mac.clone(), r)).collect();
 
         let mut loaded = self.write();
-        loaded.records = records;
+        loaded.file = records;
         loaded.mtime = mtime;
         tracing::info!(count, path = %path.display(), "loaded host records");
         Ok(count)
     }
 
+    /// Replace the whole cluster layer.
+    ///
+    /// A watch that restarts relists everything, and applying that list as a
+    /// set — rather than as a stream of applies — is what makes a delete
+    /// missed during a disconnect heal itself on the next relist.
+    pub fn set_kube_records(&self, records: Vec<HostRecord>) {
+        let mut loaded = self.write();
+        loaded.kube = records.into_iter().map(|r| (r.mac.clone(), r)).collect();
+        loaded.kube_synced = true;
+        tracing::info!(count = loaded.kube.len(), "BootHost records resynced");
+    }
+
+    /// Apply one `BootHost`.
+    pub fn apply_kube_record(&self, record: HostRecord) {
+        let mut loaded = self.write();
+        if let Some(previous) = loaded.kube.get(&record.mac)
+            && previous.object != record.object
+        {
+            // Two objects claiming one machine: whichever was applied last
+            // wins, but an operator has to be told, because the loser's
+            // identity silently stops being served.
+            tracing::warn!(
+                mac = %record.mac,
+                previous = %previous.object.as_ref().map(|o| o.to_string()).unwrap_or_default(),
+                now = %record.object.as_ref().map(|o| o.to_string()).unwrap_or_default(),
+                "two BootHosts claim the same MAC"
+            );
+        }
+        loaded.kube.insert(record.mac.clone(), record);
+    }
+
+    /// Forget one `BootHost`. The file layer, if it has this MAC, takes over.
+    pub fn remove_kube_record(&self, mac: &Mac) {
+        self.write().kube.remove(mac);
+    }
+
+    /// Whether the watch has listed the cluster at least once.
+    pub fn kube_synced(&self) -> bool {
+        self.read().kube_synced
+    }
+
+    /// The cluster layer answers first; the file is only consulted for MACs
+    /// the cluster has nothing to say about.
     pub fn lookup(&self, mac: &Mac) -> Option<HostRecord> {
-        self.read().records.get(mac).cloned()
+        let loaded = self.read();
+        loaded
+            .kube
+            .get(mac)
+            .or_else(|| loaded.file.get(mac))
+            .cloned()
+    }
+
+    /// Every record, resolved the same way `lookup` resolves one.
+    pub fn records(&self) -> Vec<HostRecord> {
+        let loaded = self.read();
+        let mut out: Vec<HostRecord> = loaded.kube.values().cloned().collect();
+        out.extend(
+            loaded
+                .file
+                .iter()
+                .filter(|(mac, _)| !loaded.kube.contains_key(mac))
+                .map(|(_, record)| record.clone()),
+        );
+        out.sort_by(|a, b| a.mac.cmp(&b.mac));
+        out
+    }
+
+    pub fn counts(&self) -> HostCounts {
+        let loaded = self.read();
+        let extra = loaded
+            .file
+            .keys()
+            .filter(|mac| !loaded.kube.contains_key(*mac))
+            .count();
+        HostCounts {
+            file: loaded.file.len(),
+            kube: loaded.kube.len(),
+            total: loaded.kube.len() + extra,
+            kube_synced: loaded.kube_synced,
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.read().records.len()
+        self.counts().total
     }
 
     pub fn is_empty(&self) -> bool {

@@ -15,11 +15,18 @@ repository = "https://github.com/glennswest/stormnetboot"
 [workspace.dependencies]
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 ed25519-dalek = "2"
+futures = "0.3"
 hex = "0.4"
+# Pinned to what the sibling operators already build with, so one cargo
+# registry cache serves the whole fleet of repos on the build box.
+k8s-openapi = { version = "0.24", features = ["v1_32"] }
+kube = { version = "0.99", default-features = false, features = ["client", "runtime", "derive", "rustls-tls", "ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
+schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "fs"] }

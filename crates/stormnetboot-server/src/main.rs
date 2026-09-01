@@ -6,12 +6,16 @@
 //! progress back, so the fleet's state between power-on and assimilation is
 //! visible while it happens.
 
+#[cfg(feature = "kubernetes")]
+mod boothost;
 mod claims;
 mod components;
 mod config;
 mod hosts;
 mod http;
 mod ipxe;
+#[cfg(feature = "kubernetes")]
+mod kube_store;
 mod mac;
 mod metrics;
 mod pallet;
@@ -36,6 +40,14 @@ use crate::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cfg = Config::parse();
+
+    // Before logging: this is a manifest generator, not a server run, and its
+    // output is piped straight into kubectl.
+    #[cfg(feature = "kubernetes")]
+    if cfg.print_crd {
+        println!("{}", boothost::crd_json()?);
+        return Ok(());
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -97,6 +109,36 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(source) = pallet_source {
         spawn_refresh_loop(state.clone(), source);
+    }
+
+    #[cfg(feature = "kubernetes")]
+    if state.cfg.kube {
+        // Not fatal. An appliance whose cluster is not up yet still has to
+        // boot the machines that will form it, and those records are in the
+        // bootstrap file.
+        match kube_store::KubeLink::connect(state.cfg.kube_namespace.clone()).await {
+            Ok(link) => {
+                let index = Arc::new(kube_store::BootHostIndex::default());
+                tracing::info!(
+                    namespace = state.cfg.kube_namespace.as_deref().unwrap_or("<all>"),
+                    status = state.cfg.writes_status(),
+                    "watching BootHost resources"
+                );
+                kube_store::spawn_watch(state.clone(), index.clone(), link.clone());
+                if state.cfg.writes_status() {
+                    kube_store::spawn_status_writer(
+                        state.clone(),
+                        index,
+                        link,
+                        std::time::Duration::from_secs(state.cfg.status_secs),
+                    );
+                }
+            }
+            Err(err) => tracing::error!(
+                %err,
+                "could not reach the Kubernetes API; serving host records from the bootstrap file alone"
+            ),
+        }
     }
 
     let boot_listener = tokio::net::TcpListener::bind(state.cfg.listen)

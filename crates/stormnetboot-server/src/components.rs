@@ -188,7 +188,7 @@ pub fn collect(state: &BootState, assets: &AssetStatus) -> Vec<ComponentSummary>
             "phases",
             counts
                 .iter()
-                .map(|(p, _)| format!("phase:{}", phase_slug(*p)))
+                .map(|(p, _)| format!("phase:{}", p.slug()))
                 .collect(),
         )],
         link: None,
@@ -232,7 +232,7 @@ pub fn collect(state: &BootState, assets: &AssetStatus) -> Vec<ComponentSummary>
 
     for (phase, count) in &counts {
         out.push(ComponentSummary {
-            id: format!("phase:{}", phase_slug(*phase)),
+            id: format!("phase:{}", phase.slug()),
             kind: "phase".into(),
             label: phase_label(*phase).to_owned(),
             health: phase_health(*phase),
@@ -249,6 +249,20 @@ pub fn collect(state: &BootState, assets: &AssetStatus) -> Vec<ComponentSummary>
         if let Some(version) = &host.pallet_version {
             metrics.push(Metric::new("pallet", version.clone()));
         }
+        if let Some(hardware) = &host.hardware {
+            if hardware.cpus > 0 {
+                metrics.push(Metric::new("cpus", hardware.cpus.to_string()));
+            }
+            if hardware.memory_kb > 0 {
+                metrics.push(Metric::new(
+                    "memory",
+                    format!("{} GiB", hardware.memory_kb / 1024 / 1024),
+                ));
+            }
+            if let Some(product) = &hardware.product {
+                metrics.push(Metric::new("product", product.clone()));
+            }
+        }
         out.push(ComponentSummary {
             id: format!("host:{}", host.mac),
             kind: "host".into(),
@@ -262,25 +276,13 @@ pub fn collect(state: &BootState, assets: &AssetStatus) -> Vec<ComponentSummary>
             actions: Vec::new(),
             relations: vec![Relation::belongs_to(
                 "phase",
-                &format!("phase:{}", phase_slug(host.phase)),
+                &format!("phase:{}", host.phase.slug()),
             )],
             link: None,
         });
     }
 
     out
-}
-
-fn phase_slug(phase: Phase) -> &'static str {
-    match phase {
-        Phase::ScriptFetched => "script-fetched",
-        Phase::AssetsFetched => "assets-fetched",
-        Phase::RootAttached => "root-attached",
-        Phase::Running => "running",
-        Phase::Assimilating => "assimilating",
-        Phase::Local => "local",
-        Phase::Failed => "failed",
-    }
 }
 
 fn short_digest(digest: &str) -> String {

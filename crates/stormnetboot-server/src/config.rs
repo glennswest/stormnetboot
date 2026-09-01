@@ -110,6 +110,50 @@ pub struct Config {
     #[arg(long, env = "STORMNETBOOT_UNKNOWN_HOSTS", default_value = "allow")]
     pub unknown_hosts: UnknownHostPolicy,
 
+    // ---- BootHost resources ------------------------------------------------
+    /// Read host records from `BootHost` resources in the cluster.
+    ///
+    /// The cluster is authoritative where it has a record; `--hosts-file`
+    /// remains underneath as the bootstrap layer, which is what lets an
+    /// appliance boot the machines that will become its own cluster.
+    #[arg(long, env = "STORMNETBOOT_KUBE", default_value_t = false)]
+    pub kube: bool,
+
+    /// Namespace to watch. Unset watches every namespace, which needs a
+    /// ClusterRole rather than a Role.
+    #[arg(long, env = "STORMNETBOOT_KUBE_NAMESPACE")]
+    pub kube_namespace: Option<String>,
+
+    /// Write boot progress back to each `BootHost`'s status subresource.
+    ///
+    /// On by default with `--kube`: a resource that never says what happened
+    /// to the machine is half a resource. Turn it off for a read-only replica
+    /// or where RBAC does not grant status writes.
+    #[arg(
+        long,
+        env = "STORMNETBOOT_KUBE_STATUS",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub kube_status: bool,
+
+    /// How often to reconcile `BootHost` status.
+    #[arg(
+        long,
+        env = "STORMNETBOOT_STATUS_SECS",
+        default_value_t = 10,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub status_secs: u64,
+
+    /// Print the `BootHost` CRD as JSON and exit.
+    ///
+    /// Generated from the types this binary actually serves, so
+    /// `stormnetboot-server --print-crd | kubectl apply -f -` cannot install
+    /// a schema that disagrees with the code.
+    #[arg(long, default_value_t = false)]
+    pub print_crd: bool,
+
     // ---- fallback boot target ---------------------------------------------
     /// NVMe/TCP portal used when no per-host claim is made.
     #[arg(long, env = "STORMNETBOOT_PORTAL")]
@@ -142,6 +186,11 @@ impl Config {
         self.registry.is_some()
     }
 
+    /// Whether `BootHost` status should be written back.
+    pub fn writes_status(&self) -> bool {
+        self.kube && self.kube_status
+    }
+
     /// Whether per-host claims can actually be made.
     pub fn claims_enabled(&self) -> bool {
         self.claim && self.registry.is_some() && self.golden.is_some()
@@ -160,6 +209,16 @@ impl Config {
                 "no --trusted-key configured: pass one, or --allow-unsigned to serve \
                  a boot pallet nobody has vouched for"
             );
+        }
+        #[cfg(not(feature = "kubernetes"))]
+        if self.kube || self.print_crd {
+            anyhow::bail!(
+                "this build has no Kubernetes client: rebuild with the `kubernetes` feature, \
+                 or run from --hosts-file"
+            );
+        }
+        if self.kube_namespace.is_some() && !self.kube {
+            anyhow::bail!("--kube-namespace has no effect without --kube");
         }
         if self.listen == self.mgmt_listen {
             anyhow::bail!(
@@ -238,6 +297,29 @@ mod tests {
     fn trusted_keys_accept_a_comma_separated_list() {
         let c = cfg(&["--trusted-key", "aa,bb,cc"]);
         assert_eq!(c.trusted_keys, vec!["aa", "bb", "cc"]);
+    }
+
+    #[test]
+    fn boothosts_are_off_until_asked_for() {
+        let c = cfg(&[]);
+        assert!(!c.kube);
+        assert!(!c.writes_status());
+    }
+
+    #[test]
+    fn status_write_back_comes_with_the_watch_and_can_be_turned_off() {
+        assert!(cfg(&["--kube"]).writes_status());
+        assert!(!cfg(&["--kube", "--kube-status", "false"]).writes_status());
+    }
+
+    #[test]
+    fn a_namespace_without_the_watch_is_a_mistake_worth_naming() {
+        assert!(cfg(&["--kube-namespace", "storm-system"]).validate().is_err());
+        assert!(
+            cfg(&["--kube", "--kube-namespace", "storm-system"])
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]

@@ -66,6 +66,10 @@ fn main() -> anyhow::Result<()> {
     // carries the inventory that replaces an inspection boot.
     let inv = inventory::collect();
     client.report("running", Some(&inv.summary()));
+    // Structured, as well as summarised: the summary is for a console row,
+    // this is what lands in the BootHost's status.hardware and is what an
+    // operator would otherwise open a BMC to read.
+    client.report_inventory(&inv);
     println!("stormnetboot-agent: reported running ({})", inv.summary());
 
     if args.once {
@@ -159,13 +163,41 @@ impl Reporter {
         }
     }
 
+    /// Report the hardware this node found in itself.
+    fn report_inventory(&self, inv: &inventory::Inventory) {
+        let mut body = serde_json::json!({
+            "mac": self.mac,
+            "cpus": inv.cpus,
+            "memory_kb": inv.memory_kb,
+            "disks": inv.disks,
+        });
+        if let Some(product) = &inv.product {
+            body["product"] = serde_json::Value::String(product.clone());
+        }
+        if let Some(serial) = &inv.serial {
+            body["serial"] = serde_json::Value::String(serial.clone());
+        }
+
+        // Never fatal, and never retried: inventory is a description, not a
+        // step. A node that cannot report it is still a booted node.
+        match self.post("/api/v1/inventory", &body.to_string()) {
+            Ok(status) if (200..300).contains(&status) => {}
+            Ok(status) => eprintln!("stormnetboot-agent: inventory rejected ({status})"),
+            Err(err) => eprintln!("stormnetboot-agent: reporting inventory failed: {err}"),
+        }
+    }
+
+    fn post(&self, path: &str, body: &str) -> anyhow::Result<u16> {
+        ureq_post(&format!("{}{path}", self.url), body)
+    }
+
     fn try_report(&self, phase: &str, detail: Option<&str>) -> anyhow::Result<()> {
         let mut body = serde_json::json!({ "mac": self.mac, "phase": phase });
         if let Some(detail) = detail {
             body["detail"] = serde_json::Value::String(detail.to_owned());
         }
 
-        let resp = ureq_post(&format!("{}/api/v1/report", self.url), &body.to_string())?;
+        let resp = self.post("/api/v1/report", &body.to_string())?;
         if !(200..300).contains(&resp) {
             anyhow::bail!("boot server returned {resp}");
         }

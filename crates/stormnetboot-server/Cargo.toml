@@ -20,3 +20,16 @@ tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+# The BootHost source. Optional so an appliance that has no cluster — a
+# bootstrap, or an air-gapped site running off hosts.json — can build a server
+# without an API client in it at all.
+chrono = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+k8s-openapi = { workspace = true, optional = true }
+kube = { workspace = true, optional = true }
+schemars = { workspace = true, optional = true }
+
+[features]
+default = ["kubernetes"]
+kubernetes = ["dep:chrono", "dep:futures", "dep:k8s-openapi", "dep:kube", "dep:schemars"]

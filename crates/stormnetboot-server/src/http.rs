@@ -28,7 +28,7 @@ use crate::{
     mac::Mac,
     metrics::Metrics,
     pallet::AssetStatus,
-    state::{BootState, Phase},
+    state::{BootState, Inventory, Phase},
 };
 
 pub struct AppState {
@@ -74,6 +74,11 @@ impl AppState {
     pub fn set_asset_status(&self, status: AssetStatus) {
         *self.assets.write().unwrap_or_else(|p| p.into_inner()) = status;
     }
+
+    /// The clone this host is booting from, for the record's status.
+    pub async fn claim_id(&self, mac: &Mac) -> Option<String> {
+        self.claims.lock().await.get(mac).map(|c| c.id.clone())
+    }
 }
 
 pub type Shared = Arc<AppState>;
@@ -93,6 +98,10 @@ pub fn boot_router(state: Shared) -> Router {
         // Booting nodes report their own progress here; they are on this
         // network, not the management one.
         .route("/api/v1/report", post(report))
+        // And what it is made of. This is the whole of "inspection": a
+        // running machine reading its own /sys and /proc, not a second boot
+        // into an agent ramdisk.
+        .route("/api/v1/inventory", post(inventory))
         .nest_service("/boot", assets)
         .layer(middleware::from_fn_with_state(state.clone(), count_requests))
         .layer(TraceLayer::new_for_http())
@@ -107,6 +116,7 @@ pub fn mgmt_router(state: Shared) -> Router {
         .route("/api/v1/components", get(components_feed))
         .route("/ws/components", get(ws_components))
         .route("/api/v1/state", get(state_dump))
+        .route("/api/v1/hosts", get(hosts_list))
         .route("/api/v1/hosts/reload", post(hosts_reload))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -155,7 +165,7 @@ async fn metrics(State(state): State<Shared>) -> Response {
     let phases = state.boot.phase_counts();
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        state.metrics.render_with_phases(&phases),
+        state.metrics.render(&phases, state.hosts.counts()),
     )
         .into_response()
 }
@@ -197,6 +207,24 @@ async fn boot_script(State(state): State<Shared>, Query(q): Query<BootQuery>) ->
         return (
             StatusCode::FORBIDDEN,
             "#!ipxe\n# this machine has no host record; refusing to boot it\nshell\n".to_string(),
+        )
+            .into_response();
+    }
+
+    // A parked machine keeps its identity and does not boot. Refusing here
+    // rather than deleting the record is what lets a host come back from
+    // repair as itself.
+    if let Some(record) = &record
+        && !record.online
+    {
+        Metrics::incr(&state.metrics.refused);
+        tracing::warn!(host = %record.name, "refusing host marked offline");
+        return (
+            StatusCode::FORBIDDEN,
+            format!(
+                "#!ipxe\n# {} is marked offline (spec.online=false); not booting it\nshell\n",
+                record.name
+            ),
         )
             .into_response();
     }
@@ -336,6 +364,34 @@ async fn report(State(state): State<Shared>, axum::Json(req): axum::Json<ReportR
     (StatusCode::ACCEPTED, "recorded\n").into_response()
 }
 
+/// A node describing its own hardware.
+#[derive(Debug, Deserialize)]
+pub struct InventoryRequest {
+    mac: String,
+    #[serde(flatten)]
+    hardware: Inventory,
+}
+
+async fn inventory(
+    State(state): State<Shared>,
+    axum::Json(req): axum::Json<InventoryRequest>,
+) -> Response {
+    let mac = match Mac::parse(&req.mac) {
+        Ok(mac) => mac,
+        Err(err) => return (StatusCode::BAD_REQUEST, format!("bad mac: {err}\n")).into_response(),
+    };
+
+    tracing::info!(
+        %mac,
+        cpus = req.hardware.cpus,
+        memory_kb = req.hardware.memory_kb,
+        product = req.hardware.product.as_deref().unwrap_or(""),
+        "node reported inventory"
+    );
+    state.boot.set_inventory(&mac, req.hardware);
+    (StatusCode::ACCEPTED, "recorded\n").into_response()
+}
+
 fn parse_phase(raw: &str) -> Option<Phase> {
     match raw.trim().to_ascii_lowercase().replace('_', "-").as_str() {
         "script-fetched" => Some(Phase::ScriptFetched),
@@ -378,6 +434,20 @@ async fn ws_components(ws: WebSocketUpgrade, State(state): State<Shared>) -> Res
 
 async fn state_dump(State(state): State<Shared>) -> Response {
     axum::Json(state.boot.snapshot()).into_response()
+}
+
+async fn hosts_list(State(state): State<Shared>) -> Response {
+    let counts = state.hosts.counts();
+    axum::Json(serde_json::json!({
+        "counts": {
+            "file": counts.file,
+            "boothost": counts.kube,
+            "total": counts.total,
+            "boothostSynced": counts.kube_synced,
+        },
+        "records": state.hosts.records(),
+    }))
+    .into_response()
 }
 
 async fn hosts_reload(State(state): State<Shared>) -> Response {
