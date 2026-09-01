@@ -1,55 +1,120 @@
-//! HTTP surface.
+//! HTTP surfaces.
 //!
-//! Everything a booting machine touches is here, and it is all HTTP: firmware
-//! that can UEFI HTTP Boot, a BMC attaching an ISO over virtual media, and
-//! iPXE chainloading all pull from these routes.
+//! Two of them, deliberately. The **boot** surface is what firmware touches —
+//! UEFI HTTP Boot, a BMC attaching an ISO over virtual media, or iPXE
+//! chainloading — and carries only what a booting machine needs. The
+//! **management** surface carries the console feed, metrics and host
+//! administration, and belongs on the other side of the network split.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, sync::RwLock};
 
 use axum::{
     Router,
-    extract::{Query, Request, State},
+    extract::{Query, Request, State, ws::WebSocketUpgrade},
     http::{StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use tower_http::{services::ServeDir, trace::TraceLayer};
 
-use crate::{config::Config, metrics::Metrics};
+use crate::{
+    claims::{ClaimClient, ClaimResponse},
+    components,
+    config::Config,
+    hosts::{HostStore, UnknownHostPolicy},
+    ipxe::{self, BootPlan},
+    mac::Mac,
+    metrics::Metrics,
+    pallet::AssetStatus,
+    state::{BootState, Phase},
+};
 
 pub struct AppState {
     pub cfg: Config,
     pub metrics: Metrics,
+    pub hosts: HostStore,
+    pub boot: BootState,
+    pub assets: RwLock<AssetStatus>,
+    pub claim_client: Option<ClaimClient>,
+    /// Claims already made, by host.
+    ///
+    /// Firmware retries — a machine that times out fetching a kernel comes
+    /// back and asks for its script again. Without this, every retry would
+    /// mint another clone and leak it.
+    claims: tokio::sync::Mutex<HashMap<Mac, ClaimResponse>>,
+}
+
+impl AppState {
+    pub fn new(
+        cfg: Config,
+        hosts: HostStore,
+        claim_client: Option<ClaimClient>,
+        assets: AssetStatus,
+    ) -> Self {
+        Self {
+            cfg,
+            metrics: Metrics::default(),
+            hosts,
+            boot: BootState::default(),
+            assets: RwLock::new(assets),
+            claim_client,
+            claims: tokio::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn asset_status(&self) -> AssetStatus {
+        self.assets
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    pub fn set_asset_status(&self, status: AssetStatus) {
+        *self.assets.write().unwrap_or_else(|p| p.into_inner()) = status;
+    }
 }
 
 pub type Shared = Arc<AppState>;
 
-/// Assets a node needs before it can talk to storage. Readiness is defined as
-/// being able to serve these, because a boot server that answers but cannot
-/// deliver a kernel is worse than one that is plainly down.
+/// Assets a machine cannot boot without.
 const REQUIRED_ASSETS: [&str; 2] = ["vmlinuz", "initramfs.img"];
 
-pub fn router(state: Shared) -> Router {
+/// The firmware-facing surface.
+pub fn boot_router(state: Shared) -> Router {
     let assets = ServeDir::new(state.cfg.asset_dir.clone());
 
     Router::new()
         .route("/health", get(health))
         .route("/readyz", get(readyz))
-        .route("/metrics", get(metrics))
         .route("/boot.ipxe", get(boot_script))
         .route("/boot.json", get(boot_listing))
+        // Booting nodes report their own progress here; they are on this
+        // network, not the management one.
+        .route("/api/v1/report", post(report))
         .nest_service("/boot", assets)
         .layer(middleware::from_fn_with_state(state.clone(), count_requests))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
+/// The management surface.
+pub fn mgmt_router(state: Shared) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/metrics", get(metrics))
+        .route("/api/v1/components", get(components_feed))
+        .route("/ws/components", get(ws_components))
+        .route("/api/v1/state", get(state_dump))
+        .route("/api/v1/hosts/reload", post(hosts_reload))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
 async fn count_requests(State(state): State<Shared>, req: Request, next: Next) -> Response {
     Metrics::incr(&state.metrics.requests_total);
-    let is_asset = req.uri().path().starts_with("/boot/");
-    if is_asset {
+    if req.uri().path().starts_with("/boot/") {
         Metrics::incr(&state.metrics.asset_requests);
     }
 
@@ -87,9 +152,10 @@ async fn readyz(State(state): State<Shared>) -> Response {
 }
 
 async fn metrics(State(state): State<Shared>) -> Response {
+    let phases = state.boot.phase_counts();
     (
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        state.metrics.render(),
+        state.metrics.render_with_phases(&phases),
     )
         .into_response()
 }
@@ -102,7 +168,86 @@ pub struct BootQuery {
 
 async fn boot_script(State(state): State<Shared>, Query(q): Query<BootQuery>) -> Response {
     Metrics::incr(&state.metrics.boot_script_requests);
-    let script = crate::ipxe::render(&state.cfg, q.mac.as_deref());
+
+    let mac = match q.mac.as_deref().map(Mac::parse) {
+        Some(Ok(mac)) => Some(mac),
+        Some(Err(err)) => {
+            // A MAC we cannot parse is a client bug or a probe; refuse rather
+            // than silently serving a default boot to an unidentified machine.
+            Metrics::incr(&state.metrics.refused);
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("#!ipxe\n# malformed mac: {err}\nshell\n"),
+            )
+                .into_response();
+        }
+        None => None,
+    };
+
+    let record = mac.as_ref().and_then(|m| state.hosts.lookup(m));
+
+    if record.is_none()
+        && state.cfg.unknown_hosts == UnknownHostPolicy::Deny
+    {
+        Metrics::incr(&state.metrics.refused);
+        tracing::warn!(
+            mac = mac.as_ref().map(|m| m.to_string()).unwrap_or_default(),
+            "refusing unknown host"
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            "#!ipxe\n# this machine has no host record; refusing to boot it\nshell\n".to_string(),
+        )
+            .into_response();
+    }
+
+    if let Some(mac) = &mac {
+        state.boot.observe(mac.clone(), Phase::ScriptFetched, None);
+    }
+
+    // Claim a per-host root volume, reusing an existing claim on retry.
+    let claim = if state.cfg.claims_enabled() {
+        match claim_for(&state, mac.as_ref(), record.as_ref().and_then(|r| r.stack.as_deref())).await
+        {
+            Ok(claim) => Some(claim),
+            Err(err) => {
+                Metrics::incr(&state.metrics.claim_failures);
+                tracing::error!(%err, "claim failed");
+                if let Some(mac) = &mac {
+                    state
+                        .boot
+                        .observe(mac.clone(), Phase::Failed, Some(format!("claim failed: {err}")));
+                }
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    format!("#!ipxe\n# could not claim a root volume: {err}\nshell\n"),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut plan = BootPlan::resolve(&state.cfg, mac.as_ref(), record.as_ref());
+    if let Some(attach) = claim.as_ref().and_then(|c| c.attach.as_ref()) {
+        plan.portal = Some(&attach.address);
+        plan.portal_port = attach.port;
+        plan.nqn = Some(&attach.target);
+        plan.nsid = attach.nsid;
+    }
+    if let Some(volume) = claim.as_ref().map(|c| c.volume_name.as_str()) {
+        plan.volume = Some(volume);
+    }
+
+    let script = ipxe::render(&state.cfg, &plan);
+
+    if let Some(mac) = &mac
+        && let Some(version) = state.asset_status().version
+    {
+        state.boot.set_pallet_version(mac, &version);
+    }
+
     (
         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
         script,
@@ -110,15 +255,37 @@ async fn boot_script(State(state): State<Shared>, Query(q): Query<BootQuery>) ->
         .into_response()
 }
 
+async fn claim_for(
+    state: &Shared,
+    mac: Option<&Mac>,
+    golden: Option<&str>,
+) -> anyhow::Result<ClaimResponse> {
+    let Some(client) = &state.claim_client else {
+        anyhow::bail!("claims are not configured");
+    };
+
+    let mut claims = state.claims.lock().await;
+    if let Some(mac) = mac
+        && let Some(existing) = claims.get(mac)
+    {
+        tracing::debug!(%mac, claim = %existing.id, "reusing existing claim");
+        return Ok(existing.clone());
+    }
+
+    let claim = client.claim(mac, golden).await?;
+    if let Some(mac) = mac {
+        claims.insert(mac.clone(), claim.clone());
+    }
+    Ok(claim)
+}
+
 #[derive(Debug, Serialize)]
 struct Listing {
-    /// Asset name to size in bytes, so a human or a script can see at a glance
-    /// what this server would hand out.
-    assets: BTreeMap<String, u64>,
+    assets: std::collections::BTreeMap<String, u64>,
 }
 
 async fn boot_listing(State(state): State<Shared>) -> Response {
-    let mut assets = BTreeMap::new();
+    let mut assets = std::collections::BTreeMap::new();
     match tokio::fs::read_dir(&state.cfg.asset_dir).await {
         Ok(mut entries) => {
             while let Ok(Some(entry)) = entries.next_entry().await {
@@ -135,5 +302,105 @@ async fn boot_listing(State(state): State<Shared>) -> Response {
             format!("asset directory unreadable: {err}\n"),
         )
             .into_response(),
+    }
+}
+
+/// A booting node telling us where it got to.
+///
+/// This is how the phases past the asset fetch become visible at all: nothing
+/// else can see a machine between `switch_root` and joining a cluster.
+#[derive(Debug, Deserialize)]
+pub struct ReportRequest {
+    mac: String,
+    phase: String,
+    #[serde(default)]
+    detail: Option<String>,
+}
+
+async fn report(State(state): State<Shared>, axum::Json(req): axum::Json<ReportRequest>) -> Response {
+    let mac = match Mac::parse(&req.mac) {
+        Ok(mac) => mac,
+        Err(err) => return (StatusCode::BAD_REQUEST, format!("bad mac: {err}\n")).into_response(),
+    };
+
+    let Some(phase) = parse_phase(&req.phase) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("unknown phase {:?}\n", req.phase),
+        )
+            .into_response();
+    };
+
+    tracing::info!(%mac, ?phase, detail = ?req.detail, "node reported");
+    state.boot.observe(mac, phase, req.detail);
+    (StatusCode::ACCEPTED, "recorded\n").into_response()
+}
+
+fn parse_phase(raw: &str) -> Option<Phase> {
+    match raw.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "script-fetched" => Some(Phase::ScriptFetched),
+        "assets-fetched" => Some(Phase::AssetsFetched),
+        "root-attached" => Some(Phase::RootAttached),
+        "running" => Some(Phase::Running),
+        "assimilating" => Some(Phase::Assimilating),
+        "local" => Some(Phase::Local),
+        "failed" => Some(Phase::Failed),
+        _ => None,
+    }
+}
+
+async fn components_feed(State(state): State<Shared>) -> Response {
+    let feed = components::collect(&state.boot, &state.asset_status());
+    axum::Json(feed).into_response()
+}
+
+/// Full-snapshot pushes, stormd-style: every 2 s, send when changed.
+async fn ws_components(ws: WebSocketUpgrade, State(state): State<Shared>) -> Response {
+    ws.on_upgrade(move |mut sock| async move {
+        let mut last = String::new();
+        loop {
+            let feed = components::collect(&state.boot, &state.asset_status());
+            let json = serde_json::to_string(&feed).unwrap_or_default();
+            if json != last {
+                if sock
+                    .send(axum::extract::ws::Message::Text(json.clone().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                last = json;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    })
+}
+
+async fn state_dump(State(state): State<Shared>) -> Response {
+    axum::Json(state.boot.snapshot()).into_response()
+}
+
+async fn hosts_reload(State(state): State<Shared>) -> Response {
+    match state.hosts.reload() {
+        Ok(count) => axum::Json(serde_json::json!({ "records": count })).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("reload failed: {err}\n"),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn phase_names_parse_in_the_spellings_a_client_might_send() {
+        assert_eq!(parse_phase("root-attached"), Some(Phase::RootAttached));
+        assert_eq!(parse_phase("root_attached"), Some(Phase::RootAttached));
+        assert_eq!(parse_phase("  RUNNING "), Some(Phase::Running));
+        assert_eq!(parse_phase("assimilating"), Some(Phase::Assimilating));
+        assert_eq!(parse_phase("nonsense"), None);
     }
 }
