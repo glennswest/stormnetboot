@@ -2,6 +2,54 @@
 
 ## [Unreleased]
 
+## [v0.4.0] — 2026-09-01
+
+### Added
+- **Direct boot media — no PXE, no DHCP options, no TFTP, no HTTP.**
+  `scripts/build-boot-media.sh` builds a GPT image with one ESP carrying a UKI
+  (EFI stub + baked command line + kernel + initramfs) at
+  `/EFI/BOOT/BOOTX64.EFI`, the removable-media path firmware boots with no
+  NVRAM entry. Everything the boot server would have handed the machine is
+  baked in, so `nvme-tcp://` is the only transport left in the path: it powers
+  on, attaches, and `switch_root`s. Write it with `dd` to a USB stick or SSD.
+- **Self-refreshing media**, and deliberately not an auto-updater — those were
+  retired here as an incident failure class. It runs once per boot, in the
+  foreground, with the root already attached; it compares the ESP's stamp
+  against the digest *the golden it just booted* declares, rather than asking
+  whether anything newer exists; and the replacement UKI is carried inside
+  that golden, so the update arrives over `nvme-tcp://` with no second source
+  of truth and nothing new to reach. It only ever affects the next boot.
+- `rd.stormnetboot.media=` names the ESP to keep current. Named rather than
+  probed: a machine that guesses which partition is its boot media can
+  overwrite the wrong one, and unlike a failed attach that is not recoverable.
+  Absent, the refresh does not run.
+
+### Fixed
+- **The initramfs module check rejected every usable module tree.** It grepped
+  `modules.dep` for `/nvme_tcp.ko`, but nvme_tcp ships as `nvme-tcp.ko.xz` —
+  module names use underscores, filenames use hyphens, and which one you get
+  differs per module (`ublk_drv.ko.xz` keeps its underscore). The build failed
+  with a message claiming a netboot root was impossible. Both spellings now
+  match.
+- **UKI section addresses were computed below the image base.** `ImageBase`
+  for systemd's `linuxx64.efi.stub` is `0x14df90000`, not zero, so addresses
+  derived from the stub's file size land underneath it; objcopy reports that
+  as a warning, exits 0, and produces a UKI whose kernel and initrd the
+  firmware never finds — an instant reset with a blank console. Addresses now
+  come from the stub's real section table, aligned to the PE
+  `SectionAlignment`, and the build verifies every section is present,
+  non-empty and at or above the image base rather than trusting the exit
+  status.
+
+### Safety
+- The media refresh never fails a boot: every error path logs and continues.
+- The UKI is renamed into place and the stamp written last, so an interrupted
+  refresh leaves a working image with a stale stamp and simply retries on the
+  next boot.
+- An ESP with no stormnetboot stamp is refused, so a mistyped
+  `rd.stormnetboot.media=` cannot overwrite a vendor recovery partition or the
+  machine's real bootloader.
+
 ## [v0.3.0] — 2026-09-01
 
 ### Added

@@ -69,6 +69,31 @@ Target: ~25 s power-on to login on the network leg (per the timing table in
 `stormblock/docs/stormblock-ipxe-boot.md`), with assimilation converging in the
 background after that.
 
+### Direct boot media — no PXE, no HTTP
+
+The whole first hop above exists to hand a machine a kernel, an initramfs and a
+command line. Local media can carry all three, which removes DHCP options,
+TFTP, HTTP and the boot server from the boot path entirely and leaves
+`nvme-tcp://` as the only transport:
+
+```
+USB/SSD ─ GPT ─ ESP ─ /EFI/BOOT/BOOTX64.EFI   ← UKI: stub + cmdline + kernel + initramfs
+   │                                            (removable-media path: no NVRAM entry needed)
+   ▼
+/init  ── attaches nvme-tcp:// straight from the baked cmdline ──▶ switch_root
+   │
+   ▼  root mounted, before the handover
+media refresh: compare the ESP stamp against the digest THIS golden declares
+   ├─ same        → nothing to do
+   ├─ different   → copy the golden's usr/lib/stormcos/boot-media/boot.efi
+   │                 over the ESP, then write the stamp
+   └─ no stamp    → refuse: that ESP is not ours
+```
+
+Built by `scripts/build-boot-media.sh`. See
+[Self-refreshing media](#self-refreshing-media) for why this is not an
+auto-updater.
+
 ## Design principles
 
 **Kubernetes/OpenShift look and feel.** An operator who knows OpenShift
@@ -190,6 +215,42 @@ already gives the cluster.
 - **Recovery**: a node that cannot boot locally re-PXEs and re-assimilates.
   The netboot path *is* the reinstall path — there is no separate installer,
   which keeps stormcos's "no installer" stance intact.
+
+### Self-refreshing media
+
+Boot media that can only be updated by carrying a USB stick to the machine
+becomes the one hand-managed thing in an otherwise hands-off platform. So the
+media updates itself — but deliberately **not** the way an auto-updater would,
+because registry-poll auto-update was retired here as an incident failure
+class. The differences are the whole point:
+
+| Auto-updater (retired) | This |
+|---|---|
+| Polls on a timer, in the background | Runs once per boot, in the foreground |
+| Asks "is there something newer?" | Asks "does the ESP match the digest **this golden** declares?" |
+| Resolves a moving tag | Compares a pinned digest |
+| Fetches from a registry over HTTP | Reads a file from the already-attached root |
+| Can change a running machine | Only ever affects the *next* boot |
+
+The golden carries `usr/lib/stormcos/boot-media/{boot.efi,media.conf}` — a
+finished UKI and the digest that belongs with it. After the root is mounted and
+before `switch_root`, `stormnetboot-init` compares that digest with the stamp
+on the ESP and rewrites the ESP if they differ. Because the payload travels
+inside the golden, an update arrives over `nvme-tcp://` like everything else;
+there is no second source of truth and nothing new to reach.
+
+Three properties make it safe to run on every boot:
+
+- **It cannot fail a boot.** Every error path logs and continues. A running
+  machine is worth more than current boot media.
+- **An interruption retries rather than lies.** The UKI is written under a
+  temporary name and renamed into place; the stamp is written *last*. A crash
+  between the two leaves a working image with a stale stamp, so the next boot
+  simply repeats the copy.
+- **It will not touch an ESP that is not ours.** The stamp doubles as proof of
+  ownership, so a mistyped `rd.stormnetboot.media=` pointing at a vendor
+  recovery partition or the machine's real bootloader is skipped, not
+  overwritten.
 
 ## OpenShift/Metal3 alignment
 
@@ -509,3 +570,44 @@ cd /root/src/stormnetboot && git pull
 export CARGO_TARGET_DIR=/build/cargo/stormnetboot
 cargo build --release && cargo test --release
 ```
+
+### Direct boot media
+
+The initramfs first, then the media that carries it. Both write to
+`/build/images` — never `/tmp`, which on dev is a tmpfs sized at half of RAM,
+so a disk image written there is memory that is never given back.
+
+```bash
+cargo build --release --target x86_64-unknown-linux-musl -p stormnetboot-init
+
+./scripts/build-netboot-initramfs.sh \
+    /build/cargo/stormnetboot/x86_64-unknown-linux-musl/release/stormnetboot-init \
+    /build/cargo/stormblock/release/stormblock
+
+./scripts/build-boot-media.sh \
+    --portal 192.168.8.129 --port 4420 \
+    --nqn nqn.2026-09.lo.g16:storage1-root \
+    --hostname storage1 --role storage \
+    --volume stormcos --media-dev /dev/sda1
+```
+
+`--portal`, `--port` and `--nqn` are required and have no defaults —
+particularly `--port`, because the iSCSI path defaults it to 3260 and this is
+not that path, so a guess attaches nothing or the wrong thing.
+
+The build emits three files:
+
+| File | Purpose |
+|---|---|
+| `stormnetboot-boot-<host>.img` | write to the stick: `dd if=… of=/dev/sdX bs=4M conv=fsync` |
+| `stormnetboot-boot-<host>.efi` | the UKI — publish into the golden as `boot.efi` |
+| `stormnetboot-boot-<host>.media.conf` | its digest — publish alongside as `media.conf` |
+
+Publishing the last two into `usr/lib/stormcos/boot-media/` is what lets the
+stick refresh itself on later boots. Skip that and the media still boots, it
+just stays on the kernel it shipped with.
+
+`--media-dev` is the ESP *as the booted machine names it* (default
+`/dev/sda1`); a USB stick is usually `sda` on a server whose internal drives
+are NVMe. Getting it wrong is safe — the refresh refuses any ESP that does not
+already carry our stamp.

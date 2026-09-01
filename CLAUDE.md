@@ -7,7 +7,7 @@ architecture; this file tracks state and the work plan.
 
 ## Version
 
-`0.3.0`, set once in the workspace `Cargo.toml` (`workspace.package.version`);
+`0.4.0`, set once in the workspace `Cargo.toml` (`workspace.package.version`);
 all three crates inherit it with `version.workspace = true`, so there is one
 place to change.
 
@@ -167,7 +167,7 @@ place to change.
       BootHosts, write only their status); `--print-crd` generates the CRD
       from the types the server serves. Behind the default `kubernetes`
       feature, so a bootstrap or air-gapped build carries no API client.
-- [ ] Phase 10 — direct boot media (in progress, 2026-09-01): a bootable
+- [x] Phase 10 — direct boot media (2026-09-01): a bootable
       USB/SSD image that replaces the whole PXE first hop. GPT + one ESP
       carrying a UKI (stub + baked cmdline + kernel + initramfs) at
       `/EFI/BOOT/BOOTX64.EFI`, the removable-media path firmware boots with no
@@ -179,7 +179,13 @@ place to change.
       differ the ESP is rewritten from a UKI carried *in the golden*, so the
       next boot runs it. Level-triggered, idempotent, digest-pinned, and it
       never fails the boot — a media refresh that cannot complete logs and
-      continues.
+      continues. Built and verified on dev: GPT + 512 MiB ESP, UKI sections
+      confirmed above the image base, kernel and initramfs byte-identical to
+      their sources, cmdline round-tripping out of `.cmdline`. Two real bugs
+      fell out — the initramfs module guard matched only underscored
+      filenames so `nvme-tcp.ko.xz` failed every build, and UKI section VMAs
+      derived from the stub's file size land below its non-zero `ImageBase`,
+      which objcopy warns about and then exits 0 on.
 - [ ] Next — publish a real boot pallet and run a machine through the whole
       chain on the appliance VM, against a live rustkube apiserver. Nothing in
       phase 9 has met a real apiserver yet: no cluster was reachable from the
