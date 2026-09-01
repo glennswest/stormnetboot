@@ -22,7 +22,11 @@ const ROOT_DEV: &str = "/dev/ublkb0";
 const SYSROOT: &str = "/sysroot";
 
 /// Modules no device announces via modalias, so nothing else loads them.
-const REQUIRED_MODULES: [&str; 6] = ["nvme_tcp", "ublk_drv", "erofs", "overlay", "ext4", "xfs"];
+const REQUIRED_MODULES: [&str; 7] = [
+    "nvme_tcp", "ublk_drv", "erofs", "overlay", "ext4", "xfs",
+    // vfat: the ESP the boot media refresh reads and rewrites.
+    "vfat",
+];
 
 const DEVICE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -69,6 +73,11 @@ pub fn run(params: &BootParams, reporter: &Reporter) -> anyhow::Result<()> {
     mount_root()?;
     write_identity(params)?;
 
+    // Runs with the root mounted and before the handover, so the golden that
+    // was just attached is the thing that decides what the media should hold.
+    // Never fails the boot; see the module docs.
+    crate::media::refresh(params, SYSROOT, reporter);
+
     reporter.phase("running", None);
     if params.local_disk.is_some() {
         // Flow-over runs inside the engine we just started; it reports
@@ -82,7 +91,7 @@ pub fn run(params: &BootParams, reporter: &Reporter) -> anyhow::Result<()> {
 
 /// Print `[uptime] message`, matching the existing initramfs's stamps so the
 /// two are readable in one console log.
-fn stamp(message: &str) {
+pub(crate) fn stamp(message: &str) {
     let uptime = std::fs::read_to_string("/proc/uptime")
         .ok()
         .and_then(|s| s.split_whitespace().next().map(|v| v.to_owned()))

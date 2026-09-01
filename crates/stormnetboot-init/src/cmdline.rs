@@ -46,6 +46,14 @@ pub struct BootParams {
     /// one thing an install must never format. Re-minting tier-0 silently
     /// invalidates every ServiceAccount token in the cluster.
     pub data_slab: Option<String>,
+    /// The ESP this machine booted from, when it booted from local media
+    /// rather than PXE.
+    ///
+    /// Naming it explicitly rather than probing is the same rule as the rest
+    /// of this file: a machine that guesses which partition is its boot media
+    /// can overwrite the wrong one, and unlike a failed attach that is not
+    /// recoverable. Absent means the media refresh does not run at all.
+    pub media_dev: Option<String>,
 }
 
 impl BootParams {
@@ -75,6 +83,9 @@ impl BootParams {
                         .extend(value.split(',').filter(|s| !s.is_empty()).map(str::to_owned));
                 }
                 "rd.stormblock.data-slab" => p.data_slab = Some(value.to_owned()),
+                // Ours, not the engine's: the engine has no concept of the
+                // media the machine booted from.
+                "rd.stormnetboot.media" => p.media_dev = Some(value.to_owned()),
                 "storm.hostname" => p.hostname = Some(value.to_owned()),
                 "storm.role" => p.role = Some(value.to_owned()),
                 "storm.report" => p.report_url = Some(value.to_owned()),

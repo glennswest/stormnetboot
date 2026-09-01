@@ -13,6 +13,7 @@
 //! server before it is attempted.
 
 mod cmdline;
+mod media;
 mod report;
 mod steps;
 
