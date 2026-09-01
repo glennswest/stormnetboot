@@ -83,8 +83,14 @@ done
 depmod -b "$ROOT" "$KVER" || die "depmod failed; the module set is incomplete"
 
 # Confirm the two modules without which this initramfs cannot do its job.
+#
+# Module *names* use underscores and module *filenames* use hyphens, and which
+# spelling you get differs per module: ublk_drv.ko.xz keeps the underscore
+# while nvme_tcp ships as nvme-tcp.ko.xz. Matching one spelling therefore
+# rejects a module tree that is perfectly good, so accept either.
 for required in nvme_tcp ublk_drv; do
-    if ! grep -q "/${required}\.ko" "$ROOT/lib/modules/$KVER/modules.dep"; then
+    pattern="/$(printf '%s' "$required" | sed 's/_/[-_]/g')\.ko"
+    if ! grep -qE "$pattern" "$ROOT/lib/modules/$KVER/modules.dep"; then
         die "$required is not in the staged module set; a netboot root is impossible without it"
     fi
 done
