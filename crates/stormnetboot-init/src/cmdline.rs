@@ -163,18 +163,41 @@ impl BootParams {
     }
 }
 
-/// Strip a trailing partition number so `/dev/sda2` and `/dev/sda` compare
-/// equal, including the `nvme0n1p2` form where the partition suffix is `pN`.
+/// Reduce a partition path to its whole device, so `/dev/sda2` and `/dev/sda`
+/// compare equal.
+///
+/// Two naming schemes, and conflating them is the trap: `sda2` is a partition
+/// of `sda`, but `nvme0n1` is a *whole device* whose name simply ends in a
+/// digit — its partitions are `nvme0n1p2`. Blindly trimming trailing digits
+/// turns `/dev/nvme0n1` into `/dev/nvme0n`, which matches nothing, and the
+/// guard that depends on it silently stops guarding.
 fn device_base(path: &str) -> String {
-    let trimmed = path.trim_end_matches(|c: char| c.is_ascii_digit());
-    if trimmed.ends_with('p') && trimmed.len() > 1 {
-        let without_p = &trimmed[..trimmed.len() - 1];
-        // Only an `nvme0n1p2`-style name ends in a digit before the `p`.
-        if without_p.ends_with(|c: char| c.is_ascii_digit()) {
-            return without_p.to_owned();
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let prefix = &path[..path.len() - name.len()];
+
+    // `nvme0n1p2`, `mmcblk0p1`: a `p` preceded by a digit and followed only by
+    // digits is a partition suffix.
+    if let Some(idx) = name.rfind('p') {
+        let (head, tail) = name.split_at(idx);
+        let digits = &tail[1..];
+        if !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && head.ends_with(|c: char| c.is_ascii_digit())
+        {
+            return format!("{prefix}{head}");
         }
     }
-    trimmed.to_owned()
+
+    // Names whose trailing digits belong to the device itself.
+    if name.starts_with("nvme") || name.starts_with("mmcblk") || name.starts_with("loop") {
+        return path.to_owned();
+    }
+
+    // `sda2` → `sda`.
+    format!(
+        "{prefix}{}",
+        name.trim_end_matches(|c: char| c.is_ascii_digit())
+    )
 }
 
 /// PXE's `BOOTIF` arrives as `01-aa-bb-cc-dd-ee-ff`: a hardware-type prefix
@@ -312,6 +335,11 @@ mod tests {
         assert_eq!(device_base("/dev/sda"), "/dev/sda");
         assert_eq!(device_base("/dev/nvme0n1p2"), "/dev/nvme0n1");
         assert_eq!(device_base("/dev/nvme0n1"), "/dev/nvme0n1");
+        assert_eq!(device_base("/dev/mmcblk0p1"), "/dev/mmcblk0");
+        assert_eq!(device_base("/dev/mmcblk0"), "/dev/mmcblk0");
+        // Two different NVMe namespaces must NOT collapse together, or the
+        // guard would refuse a perfectly safe flow-over.
+        assert_ne!(device_base("/dev/nvme0n1"), device_base("/dev/nvme0n2"));
 
         // nvme partition vs whole device must still be caught
         let p = BootParams::parse(
