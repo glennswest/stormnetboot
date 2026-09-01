@@ -36,11 +36,18 @@ pub fn run(params: &BootParams, reporter: &Reporter) -> anyhow::Result<()> {
     mount_pseudo_filesystems()?;
     load_modules();
 
+    // Checked before anything is attached, and before the engine could start
+    // migrating: a flow-over onto the data slab destroys node identity, and it
+    // does so in the background while the node still looks healthy.
+    if let Err(err) = params.check_local_disk() {
+        bail!("{err}");
+    }
+
     if params.is_network_boot() {
         // Root is on the other side of a NIC, so the NIC has to work first.
         // A local slab boot deliberately skips this: no network, no wait.
         bring_up_network(params)?;
-    } else if params.slab.is_none() {
+    } else if params.slabs.is_empty() {
         let missing = params.missing().join(", ");
         bail!(
             "no root source on the command line: missing {missing} \
@@ -189,13 +196,16 @@ fn start_engine(params: &BootParams) -> anyhow::Result<std::process::Child> {
     cmd.arg("boot-local");
 
     // A remote namespace and a local partition are the same thing to the
-    // engine: both are just a slab it is handed.
-    let slab = match (params.nvme_uri(), params.slab.as_deref()) {
-        (Some(uri), _) => uri,
-        (None, Some(slab)) => slab.to_owned(),
-        (None, None) => bail!("no slab to boot from"),
-    };
-    cmd.arg("--slab").arg(&slab);
+    // engine: both are just a slab it is handed, and `--slab` has always been
+    // repeatable. The system slab carries what an image replaces; the data
+    // slab carries what must outlive it.
+    let slabs = params.all_slabs();
+    if slabs.is_empty() {
+        bail!("no slab to boot from");
+    }
+    for slab in &slabs {
+        cmd.arg("--slab").arg(slab);
+    }
 
     if let Some(volume) = &params.volume {
         cmd.arg("--volume").arg(volume);
@@ -204,7 +214,10 @@ fn start_engine(params: &BootParams) -> anyhow::Result<std::process::Child> {
         cmd.arg("--local-disk").arg(disk);
     }
 
-    stamp(&format!("starting engine on {slab}"));
+    stamp(&format!("starting engine on {}", slabs.join(", ")));
+    if let Some(data) = &params.data_slab {
+        stamp(&format!("data slab {data} carries node identity; never formatted"));
+    }
     let child = cmd
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())

@@ -32,8 +32,20 @@ pub struct BootParams {
     pub report_url: Option<String>,
     /// This machine's MAC, so reports identify it the same way the server does.
     pub mac: Option<String>,
-    /// Fall back to a local slab (a device path) instead of the network.
-    pub slab: Option<String>,
+    /// Local slabs to attach instead of, or alongside, the network root.
+    ///
+    /// A list because the engine has always taken `--slab` repeatably: the
+    /// system slab holds the goldens an image replaces, and a data slab holds
+    /// what must outlive it.
+    pub slabs: Vec<String>,
+    /// The slab holding node identity and per-service data — tier-0
+    /// (`/data/stormcert`: the node CA, the apiserver cert, the
+    /// ServiceAccount signing key) and the `-data` volumes.
+    ///
+    /// Attached like any other slab, but tracked separately because it is the
+    /// one thing an install must never format. Re-minting tier-0 silently
+    /// invalidates every ServiceAccount token in the cluster.
+    pub data_slab: Option<String>,
 }
 
 impl BootParams {
@@ -56,7 +68,13 @@ impl BootParams {
                 // No `rd.` prefix: this is the engine's existing spelling.
                 "stormblock.volume" => p.volume = Some(value.to_owned()),
                 "rd.stormblock.local-disk" => p.local_disk = Some(value.to_owned()),
-                "rd.stormblock.slab" => p.slab = Some(value.to_owned()),
+                // Comma-separated: the engine takes --slab repeatably, so the
+                // command line should be able to name more than one too.
+                "rd.stormblock.slab" => {
+                    p.slabs
+                        .extend(value.split(',').filter(|s| !s.is_empty()).map(str::to_owned));
+                }
+                "rd.stormblock.data-slab" => p.data_slab = Some(value.to_owned()),
                 "storm.hostname" => p.hostname = Some(value.to_owned()),
                 "storm.role" => p.role = Some(value.to_owned()),
                 "storm.report" => p.report_url = Some(value.to_owned()),
@@ -86,6 +104,49 @@ impl BootParams {
         self.nvme_uri().is_some()
     }
 
+    /// Every slab to attach, in order: the root source first, then the data
+    /// slab, then any others named.
+    ///
+    /// The data slab is attached like any other — what makes it special is
+    /// only that nothing may format it.
+    pub fn all_slabs(&self) -> Vec<String> {
+        let mut slabs = Vec::new();
+        if let Some(uri) = self.nvme_uri() {
+            slabs.push(uri);
+        }
+        slabs.extend(self.slabs.iter().cloned());
+        if let Some(data) = &self.data_slab
+            && !slabs.iter().any(|s| s == data)
+        {
+            slabs.push(data.clone());
+        }
+        slabs
+    }
+
+    /// Refuse a flow-over that would destroy the data slab.
+    ///
+    /// `--local-disk` formats its target. Pointing it at the disk holding
+    /// tier-0 would wipe the node's CA and its ServiceAccount signing key,
+    /// which invalidates every token in the cluster — and it would do it
+    /// silently, in the background, while the node looks healthy.
+    pub fn check_local_disk(&self) -> Result<(), String> {
+        let (Some(disk), Some(data)) = (&self.local_disk, &self.data_slab) else {
+            return Ok(());
+        };
+
+        // Compare the underlying device, so /dev/sda2 as a data slab also
+        // protects against a flow-over onto /dev/sda.
+        let disk_base = device_base(disk);
+        let data_base = device_base(data);
+        if disk_base == data_base {
+            return Err(format!(
+                "refusing flow-over onto {disk}: it holds the data slab {data}, \
+                 and formatting it would destroy this node's identity"
+            ));
+        }
+        Ok(())
+    }
+
     /// What is missing, for an error a human can act on at 3am.
     pub fn missing(&self) -> Vec<&'static str> {
         let mut missing = Vec::new();
@@ -100,6 +161,20 @@ impl BootParams {
         }
         missing
     }
+}
+
+/// Strip a trailing partition number so `/dev/sda2` and `/dev/sda` compare
+/// equal, including the `nvme0n1p2` form where the partition suffix is `pN`.
+fn device_base(path: &str) -> String {
+    let trimmed = path.trim_end_matches(|c: char| c.is_ascii_digit());
+    if trimmed.ends_with('p') && trimmed.len() > 1 {
+        let without_p = &trimmed[..trimmed.len() - 1];
+        // Only an `nvme0n1p2`-style name ends in a digit before the `p`.
+        if without_p.ends_with(|c: char| c.is_ascii_digit()) {
+            return without_p.to_owned();
+        }
+    }
+    trimmed.to_owned()
 }
 
 /// PXE's `BOOTIF` arrives as `01-aa-bb-cc-dd-ee-ff`: a hardware-type prefix
@@ -172,7 +247,7 @@ mod tests {
     fn a_local_slab_boot_is_not_a_network_boot() {
         let p = BootParams::parse("rd.stormblock.slab=/dev/sda4 stormblock.volume=stormpump");
         assert!(!p.is_network_boot());
-        assert_eq!(p.slab.as_deref(), Some("/dev/sda4"));
+        assert_eq!(p.slabs, vec!["/dev/sda4"]);
     }
 
     #[test]
@@ -182,4 +257,67 @@ mod tests {
         assert!(p.port.is_none());
         assert_eq!(p.missing().len(), 3);
     }
+    #[test]
+    fn slab_accepts_a_comma_separated_list() {
+        // The engine has always taken --slab repeatably; the command line
+        // should be able to say so too.
+        let p = BootParams::parse("rd.stormblock.slab=/dev/sda4,/dev/sda5");
+        assert_eq!(p.slabs, vec!["/dev/sda4", "/dev/sda5"]);
+    }
+
+    #[test]
+    fn the_data_slab_is_attached_alongside_the_root_source() {
+        let p = BootParams::parse(
+            "rd.stormblock.portal=h rd.stormblock.port=4431 rd.stormblock.nqn=nqn.x \
+             rd.stormblock.data-slab=/dev/sdb1",
+        );
+        let slabs = p.all_slabs();
+        assert_eq!(slabs.len(), 2);
+        assert!(slabs[0].starts_with("nvme-tcp://"));
+        assert_eq!(slabs[1], "/dev/sdb1");
+    }
+
+    #[test]
+    fn a_data_slab_already_named_as_a_slab_is_not_attached_twice() {
+        let p = BootParams::parse(
+            "rd.stormblock.slab=/dev/sdb1 rd.stormblock.data-slab=/dev/sdb1",
+        );
+        assert_eq!(p.all_slabs(), vec!["/dev/sdb1"]);
+    }
+
+    #[test]
+    fn flow_over_onto_the_data_slab_is_refused() {
+        // The failure this prevents is silent and total: formatting tier-0
+        // re-mints the node CA and the ServiceAccount signing key, which
+        // invalidates every token in the cluster.
+        let p = BootParams::parse(
+            "rd.stormblock.data-slab=/dev/sda2 rd.stormblock.local-disk=/dev/sda",
+        );
+        let err = p.check_local_disk().unwrap_err();
+        assert!(err.contains("refusing flow-over"), "{err}");
+        assert!(err.contains("identity"), "{err}");
+    }
+
+    #[test]
+    fn flow_over_onto_a_different_disk_is_allowed() {
+        let p = BootParams::parse(
+            "rd.stormblock.data-slab=/dev/sdb1 rd.stormblock.local-disk=/dev/sda",
+        );
+        assert!(p.check_local_disk().is_ok());
+    }
+
+    #[test]
+    fn partition_suffixes_do_not_hide_the_same_device() {
+        assert_eq!(device_base("/dev/sda2"), "/dev/sda");
+        assert_eq!(device_base("/dev/sda"), "/dev/sda");
+        assert_eq!(device_base("/dev/nvme0n1p2"), "/dev/nvme0n1");
+        assert_eq!(device_base("/dev/nvme0n1"), "/dev/nvme0n1");
+
+        // nvme partition vs whole device must still be caught
+        let p = BootParams::parse(
+            "rd.stormblock.data-slab=/dev/nvme0n1p2 rd.stormblock.local-disk=/dev/nvme0n1",
+        );
+        assert!(p.check_local_disk().is_err());
+    }
+
 }
