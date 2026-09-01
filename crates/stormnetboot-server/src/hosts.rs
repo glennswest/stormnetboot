@@ -162,7 +162,7 @@ impl HostStore {
         {
             let loaded = self.read();
             if mtime.is_some() && loaded.mtime == mtime {
-                return Ok(loaded.records.len());
+                return Ok(loaded.file.len());
             }
         }
 
@@ -358,6 +358,93 @@ mod tests {
             loaded: RwLock::new(Loaded::default()),
         };
         assert!(store.reload().is_err());
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn record(mac: &str, name: &str) -> HostRecord {
+        HostRecord {
+            mac: Mac::parse(mac).unwrap(),
+            name: name.to_owned(),
+            role: None,
+            stack: None,
+            portal: None,
+            extra_cmdline: None,
+            online: true,
+            object: Some(ObjectRef {
+                namespace: "storm-system".into(),
+                name: name.to_owned(),
+                generation: 1,
+            }),
+        }
+    }
+
+    #[test]
+    fn the_cluster_layer_wins_and_the_file_only_fills_the_gaps() {
+        let path = temp_file(
+            r#"[
+                {"mac":"aa:bb:cc:dd:ee:01","name":"from-file"},
+                {"mac":"aa:bb:cc:dd:ee:02","name":"only-in-file"}
+            ]"#,
+        );
+        let store = HostStore::from_file(path.clone());
+        store.set_kube_records(vec![
+            record("aa:bb:cc:dd:ee:01", "from-cluster"),
+            record("aa:bb:cc:dd:ee:03", "only-in-cluster"),
+        ]);
+
+        // A BootHost overrides the bootstrap file for the same machine.
+        let overridden = store.lookup(&Mac::parse("aa:bb:cc:dd:ee:01").unwrap()).unwrap();
+        assert_eq!(overridden.name, "from-cluster");
+        // A machine the cluster says nothing about still boots from the file.
+        assert_eq!(
+            store.lookup(&Mac::parse("aa:bb:cc:dd:ee:02").unwrap()).unwrap().name,
+            "only-in-file"
+        );
+        assert_eq!(
+            store.lookup(&Mac::parse("aa:bb:cc:dd:ee:03").unwrap()).unwrap().name,
+            "only-in-cluster"
+        );
+
+        let counts = store.counts();
+        assert_eq!((counts.file, counts.kube, counts.total), (2, 2, 3));
+        assert!(counts.kube_synced);
+        assert_eq!(store.records().len(), 3);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn deleting_a_boothost_falls_back_to_the_file_rather_than_to_nothing() {
+        let path = temp_file(r#"[{"mac":"aa:bb:cc:dd:ee:01","name":"from-file"}]"#);
+        let store = HostStore::from_file(path.clone());
+        store.apply_kube_record(record("aa:bb:cc:dd:ee:01", "from-cluster"));
+        assert_eq!(
+            store.lookup(&Mac::parse("aa:bb:cc:dd:ee:01").unwrap()).unwrap().name,
+            "from-cluster"
+        );
+
+        store.remove_kube_record(&Mac::parse("aa:bb:cc:dd:ee:01").unwrap());
+        assert_eq!(
+            store.lookup(&Mac::parse("aa:bb:cc:dd:ee:01").unwrap()).unwrap().name,
+            "from-file"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_unsynced_store_says_so_rather_than_claiming_the_fleet_is_empty() {
+        let store = HostStore::empty();
+        assert!(!store.kube_synced());
+        store.set_kube_records(Vec::new());
+        assert!(store.kube_synced());
+    }
+
+    #[test]
+    fn records_default_to_online() {
+        let path = temp_file(r#"[{"mac":"aa:bb:cc:dd:ee:01","name":"n1"},
+                                 {"mac":"aa:bb:cc:dd:ee:02","name":"n2","online":false}]"#);
+        let store = HostStore::from_file(path.clone());
+        assert!(store.lookup(&Mac::parse("aa:bb:cc:dd:ee:01").unwrap()).unwrap().online);
+        assert!(!store.lookup(&Mac::parse("aa:bb:cc:dd:ee:02").unwrap()).unwrap().online);
         let _ = std::fs::remove_file(path);
     }
 }
