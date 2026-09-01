@@ -4,6 +4,18 @@
 
 ### 2026-09-01 — v0.2.0
 
+- **feat:** Multi-slab boot. `rd.stormblock.slab=` now takes a comma-separated
+  list (mapping to the engine's already-repeatable `--slab`), and
+  `rd.stormblock.data-slab=` names the slab holding node identity and
+  per-service data. The init **refuses to start a flow-over whose
+  `--local-disk` target is the same physical device as the data slab** —
+  formatting it would re-mint the node CA and the ServiceAccount signing key,
+  invalidating every token in the cluster, silently and in the background.
+  Engine-side fixes filed as glennswest/stormblock#88 and
+  glennswest/stormpump#12.
+- **fix:** `device_base` no longer strips an NVMe namespace digit, which had
+  reduced `/dev/nvme0n1` to `/dev/nvme0n` and would have let the data-slab
+  guard pass on the very device it was meant to protect.
 - **feat:** Pallet projection. `stormnetboot-server` fetches the boot pallet
   from sbregistry by digest, verifies its STORMSIG signature (Ed25519, trusted
   key list, subject binding checked before the signature maths so a valid
