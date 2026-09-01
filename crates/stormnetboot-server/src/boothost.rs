@@ -46,7 +46,12 @@ fn online_by_default() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct BootHostSpec {
     /// MAC that PXE boots. The host's identity.
+    ///
+    /// Constrained in the schema as well as parsed here: a MAC the apiserver
+    /// accepted and the boot server cannot match is a machine that silently
+    /// never boots, and the apiserver is the cheaper place to find that out.
     #[serde(rename = "bootMACAddress")]
+    #[schemars(regex(pattern = r"^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$"))]
     pub boot_mac_address: String,
     /// Name this machine takes, for the rest of its life. Defaults to the
     /// object's own name, which is the spelling an operator already typed.
@@ -523,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn the_generated_crd_matches_the_shipped_manifest() {
+    fn the_generated_crd_carries_the_contract_the_manifest_promises() {
         let crd: serde_json::Value = serde_json::from_str(&crd_json().unwrap()).unwrap();
         assert_eq!(crd["metadata"]["name"], "boothosts.netboot.storm.io");
         assert_eq!(crd["spec"]["group"], "netboot.storm.io");
@@ -542,10 +547,21 @@ mod tests {
             .collect();
         assert_eq!(columns, ["MAC", "Hostname", "Role", "Phase", "Pallet", "Age"]);
 
-        let required = version["schema"]["openAPIV3Schema"]["properties"]["spec"]["required"]
-            .as_array()
-            .unwrap();
-        assert!(required.iter().any(|r| r == "bootMACAddress"));
+        let spec = &version["schema"]["openAPIV3Schema"]["properties"]["spec"];
+        assert!(
+            spec["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r == "bootMACAddress")
+        );
+        // The apiserver rejects an unusable MAC before a machine waits on it.
+        assert!(
+            spec["properties"]["bootMACAddress"]["pattern"]
+                .as_str()
+                .unwrap()
+                .contains("[0-9a-fA-F]{2}")
+        );
     }
 
     #[test]

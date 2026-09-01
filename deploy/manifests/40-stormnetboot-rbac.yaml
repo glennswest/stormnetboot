@@ -1,0 +1,48 @@
+# What stormnetboot-server may do in the appliance cluster.
+#
+# Read every BootHost, and write only their status. It never creates, edits or
+# deletes one: which machines exist and what they should be is an operator's
+# statement, and a boot server that could rewrite that could re-identify a
+# machine mid-fleet-install. Status is the only thing it knows that the
+# operator does not, so status is the only thing it writes.
+#
+# Cluster-scoped because BootHosts are expected to be namespaced by tenant or
+# by site while one appliance cluster boots all of them. Set
+# STORMNETBOOT_KUBE_NAMESPACE and swap this for a Role + RoleBinding if a site
+# keeps them all in one namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: stormnetboot
+  namespace: storm-system
+  annotations:
+    addonmanager.kubernetes.io/mode: Reconcile
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: stormnetboot
+  annotations:
+    addonmanager.kubernetes.io/mode: Reconcile
+rules:
+  - apiGroups: ["netboot.storm.io"]
+    resources: ["boothosts"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["netboot.storm.io"]
+    resources: ["boothosts/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: stormnetboot
+  annotations:
+    addonmanager.kubernetes.io/mode: Reconcile
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: stormnetboot
+subjects:
+  - kind: ServiceAccount
+    name: stormnetboot
+    namespace: storm-system

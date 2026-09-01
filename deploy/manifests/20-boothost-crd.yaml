@@ -6,6 +6,15 @@
 #
 # Identity is pinned here, before the machine has an OS to decide it with,
 # which is what makes day-2 join a profile change rather than a reprovision.
+#
+# This copy is the readable one — it carries the comments, and applying it is
+# how the CRD normally lands. The equivalent is generated from the Rust types
+# the server actually serves:
+#
+#   stormnetboot-server --print-crd | kubectl apply -f -
+#
+# Either may be applied; they describe the same schema, and a test asserts the
+# generated one still carries this contract.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:

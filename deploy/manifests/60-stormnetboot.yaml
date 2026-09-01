@@ -23,6 +23,8 @@ spec:
         app: stormnetboot
     spec:
       priorityClassName: system-node-critical
+      # Reads BootHosts and writes their status; see 40-stormnetboot-rbac.yaml.
+      serviceAccountName: stormnetboot
       # Only appliance members serve boot; a worker carries the golden and
       # does not run it.
       nodeSelector:
@@ -45,6 +47,13 @@ spec:
               value: http://boot.storm.lo:8080
             - name: STORMNETBOOT_ASSET_DIR
               value: /var/lib/stormnetboot/assets
+            # BootHost resources are the host record source; the file below is
+            # the bootstrap layer beneath them, which is what boots the
+            # machines that will become a cluster.
+            - name: STORMNETBOOT_KUBE
+              value: "true"
+            - name: STORMNETBOOT_HOSTS_FILE
+              value: /var/lib/stormnetboot/hosts.json
             - name: STORMNETBOOT_PALLET_REPO
               value: stormcos/boot
             - name: STORMNETBOOT_PALLET_REF
