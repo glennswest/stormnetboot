@@ -167,6 +167,19 @@ place to change.
       BootHosts, write only their status); `--print-crd` generates the CRD
       from the types the server serves. Behind the default `kubernetes`
       feature, so a bootstrap or air-gapped build carries no API client.
+- [ ] Phase 10 — direct boot media (in progress, 2026-09-01): a bootable
+      USB/SSD image that replaces the whole PXE first hop. GPT + one ESP
+      carrying a UKI (stub + baked cmdline + kernel + initramfs) at
+      `/EFI/BOOT/BOOTX64.EFI`, the removable-media path firmware boots with no
+      NVRAM entry. No DHCP options, no TFTP, no HTTP: the cmdline is baked, and
+      the only transport is `nvme-tcp://` to a stormblock on pve.
+      Self-refresh follows the platform rule — **not** a poll-and-apply
+      updater. At boot, after the root is attached, the media's embedded pallet
+      digest is compared with the digest the attached root declares; if they
+      differ the ESP is rewritten from a UKI carried *in the golden*, so the
+      next boot runs it. Level-triggered, idempotent, digest-pinned, and it
+      never fails the boot — a media refresh that cannot complete logs and
+      continues.
 - [ ] Next — publish a real boot pallet and run a machine through the whole
       chain on the appliance VM, against a live rustkube apiserver. Nothing in
       phase 9 has met a real apiserver yet: no cluster was reachable from the
