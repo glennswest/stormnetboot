@@ -23,6 +23,11 @@
   boot-complete); operator split clarified against the live Go bmh-operator
   and the deferred bmh-operator-rs stub; appliance VM detail (impulse1 data
   volume, hosts IPMI/BMH layer and updates).
+- **docs:** Design principles: Kubernetes/OpenShift look and feel (spec/
+  status, standard conditions, printer columns, Events, level-triggered
+  idempotent reconcile, console plugin panel) and data-center constant-usage
+  rules (no stop-the-world, background yields to foreground, resumable and
+  idempotent, bounded for long uptime, observable by default).
 - **docs:** HTTP-first boot: UEFI HTTP Boot and BMC virtual-media ISO as the
   normal paths, HTTP-served iPXE for chainload, TFTP demoted to a
   last-resort responder for legacy PXE ROMs. The appliance/storage cluster

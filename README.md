@@ -69,6 +69,43 @@ Target: ~25 s power-on to login on the network leg (per the timing table in
 `stormblock/docs/stormblock-ipxe-boot.md`), with assimilation converging in the
 background after that.
 
+## Design principles
+
+**Kubernetes/OpenShift look and feel.** An operator who knows OpenShift
+should already know how to drive this. Concretely: every resource splits
+`spec` (desired) from `status` (observed) and carries standard
+`status.conditions` — `Available` / `Progressing` / `Degraded` with
+`reason`, `message`, `lastTransitionTime`, and `observedGeneration`.
+Reconciliation is level-triggered and idempotent, never a one-shot
+imperative command. Resources declare `additionalPrinterColumns` so
+`oc get bmh` is readable at a glance, and state transitions emit Events
+(rustkube serves events.k8s.io/v1, and honours printer columns and CRD
+status subresources). The console side follows the same rule: stormconsole
+is already patterned on the OpenShift console, so netboot state arrives as a
+plugin panel rather than a bespoke UI.
+
+**Built for a data center that never stops.** Provisioning infrastructure is
+not a maintenance-window tool — it runs continuously while the fleet it
+serves is in production:
+
+- **Nothing stops the world.** The boot tier is HA by construction
+  (independent appliance cluster, stateless servers behind Services,
+  replicated goldens), and upgrading the boot tier itself is a rolling
+  operation like any other workload.
+- **Background work yields to foreground work.** Assimilation is the
+  model: flow-over migrates one extent per lock cycle precisely so root I/O
+  keeps flowing while it runs. Anything long-running here inherits that
+  rule — throttled, pre-emptible, never starving the node's real job.
+- **Failure is routine, not exceptional.** Drives fail, nodes die, BMCs
+  hang, a segment drops. Every operation is resumable and idempotent: an
+  interrupted flow-over continues, a half-finished claim is reclaimed, a
+  node that vanished mid-provision is retried or escalated.
+- **Bounded for long uptime.** No unbounded queues, logs, or caches;
+  backpressure when a thousand machines boot at once instead of collapse.
+- **Observable by default.** Prometheus `/metrics` (as stormblock and
+  sbregistry already expose), conditions that mean something to an alert
+  rule, and events that explain transitions after the fact.
+
 ## Components (Rust workspace)
 
 1. **`stormnetboot-server`** — the boot asset service, hosted on stormcos

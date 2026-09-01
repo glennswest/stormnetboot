@@ -93,6 +93,17 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
   sealed goldens in sbregistry and land as CoW clone swaps. stormnetboot's
   boot-pallet projection must follow the same rule — serve by digest from the
   active pallet, never "latest".
+- **Kubernetes/OpenShift look and feel is a requirement**: spec/status split,
+  standard conditions (Available/Progressing/Degraded) with reason/message/
+  lastTransitionTime/observedGeneration, printer columns, Events on
+  transitions, level-triggered idempotent reconcile. An OpenShift operator
+  should recognize everything.
+- **Designed for a data center that never stops**: HA boot tier (no
+  stop-the-world), background work yields to foreground (flow-over's
+  one-extent-per-lock-cycle is the model), every operation resumable and
+  idempotent because failure is routine, bounded queues/logs for long
+  uptime, backpressure instead of collapse under a boot surge, Prometheus
+  metrics + meaningful conditions for alerting.
 - Console integration goes through the stormview contract: stormconsole
   aggregates every domain's components at `/api/v1/components` +
   `/ws/components`; stormnetboot-server publishes its own feed.
