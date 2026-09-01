@@ -322,8 +322,36 @@ watchable from the fleet view in real time.
   Whether clone claims happen operator-side or server-side needs settling
   before phase 3.
 
+## Status
+
+`stormnetboot-server` v0.1.0 serves the boot chain from a directory of assets:
+per-host `/boot.ipxe`, `/boot/<asset>` with Range support, `/boot.json`,
+`/health`, `/readyz`, `/metrics`. Pallet projection (phase 2) and per-host
+clone claims (phase 3) are next; see `CLAUDE.md` for the work plan.
+
+```bash
+stormnetboot-server \
+  --listen 0.0.0.0:8080 \
+  --asset-dir /var/lib/stormnetboot/assets \
+  --base-url https://boot.storm.lo \
+  --portal 192.168.8.150
+```
+
+Every flag has a `STORMNETBOOT_*` environment variable, so the same binary
+runs from a shell, a boot.d spec, or a container with no config file.
+`/readyz` fails until `vmlinuz` and `initramfs.img` are actually present —
+a boot server that answers but cannot deliver a kernel is worse than one
+that is plainly down.
+
 ## Building
 
 Per the cross-project rules: **all builds run on `root@dev.g8.lo`**, with
 `CARGO_TARGET_DIR=/build/cargo/stormnetboot`. Editing on the Mac is fine;
 trusting a Mac build is not.
+
+```bash
+ssh root@dev.g8.lo
+cd /root/src/stormnetboot && git pull
+export CARGO_TARGET_DIR=/build/cargo/stormnetboot
+cargo build --release && cargo test --release
+```

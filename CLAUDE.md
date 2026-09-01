@@ -118,9 +118,14 @@ locations (workspace `Cargo.toml`, member crates) must match once they exist.
 ## Work plan
 
 - [x] Phase 0 — design: README architecture, this work plan, changelog (2026-08-31)
-- [ ] Phase 1 — `stormnetboot-server` skeleton: axum HTTP serving static iPXE
-      binaries + templated `boot.ipxe`; minimal TFTP for firmware chainload;
-      `/health`, `/metrics`
+- [x] Phase 1 — `stormnetboot-server` skeleton (2026-09-01): axum HTTP
+      serving boot assets from a directory (ServeDir, so Range works — HTTP
+      boot needs it), templated per-host `/boot.ipxe`, `/boot.json` listing,
+      `/health`, `/readyz` (fails while kernel/initramfs are missing),
+      `/metrics`, SIGTERM graceful shutdown. Built and tested on dev; smoke
+      test covers all routes, 206 ranges, and 404 accounting. No TFTP —
+      HTTP-first by decision; a last-resort responder can come later if real
+      legacy hardware demands it.
 - [ ] Phase 2 — pallet projection: fetch the active signed boot pallet from
       sbregistry (engine pallet as cache), stream `/boot/vmlinuz` and
       `/boot/initramfs.img` out of it, verify STORMSIG before serving

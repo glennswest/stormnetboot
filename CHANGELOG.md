@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### 2026-09-01
+- **feat:** `stormnetboot-server` v0.1.0 — Rust/axum boot asset service:
+  per-host rendered `/boot.ipxe`, asset serving under `/boot/` with Range
+  support, `/boot.json` listing, `/health`, `/readyz` gated on the kernel and
+  initramfs actually being present, Prometheus `/metrics`, and graceful
+  SIGTERM shutdown for running under stormpump.
+- **fix:** Corrected an iPXE render test that asserted the wrong cmdline
+  ordering (extra cmdline appends after `root=`, not after the portal).
+- **docs:** Image loadouts: `min` (boot+kernel, multi-stage from an
+  appliance) and `max` (full stack, `--offline`, one-and-done) as named
+  stacks; ISO / raw / qcow2 from one spec; max is what bootstraps the first
+  appliance and covers air-gapped sites.
+
 ### 2026-08-31
 - **docs:** Initial architecture: componentized PXE chain hosted on stormcos;
   tiny kernel/initramfs boot payload; root over NVMe/TCP from a stormblock
