@@ -219,13 +219,13 @@ mod tests {
 
     #[test]
     fn flow_over_target_is_passed_through_when_configured() {
-        let cfg = cfg(&["--portal", "10.0.0.5", "--local-disk", "/dev/sda"]);
-        let plan = BootPlan::resolve(&cfg, None, None);
-        assert!(render(&cfg, &plan).contains("rd.stormblock.local-disk=/dev/sda"));
+        let with_disk = cfg(&["--portal", "10.0.0.5", "--local-disk", "/dev/sda"]);
+        let plan = BootPlan::resolve(&with_disk, None, None);
+        assert!(render(&with_disk, &plan).contains("rd.stormblock.local-disk=/dev/sda"));
 
-        let cfg = cfg(&["--portal", "10.0.0.5"]);
-        let plan = BootPlan::resolve(&cfg, None, None);
-        assert!(!render(&cfg, &plan).contains("local-disk"));
+        let without = cfg(&["--portal", "10.0.0.5"]);
+        let plan = BootPlan::resolve(&without, None, None);
+        assert!(!render(&without, &plan).contains("local-disk"));
     }
 
     #[test]

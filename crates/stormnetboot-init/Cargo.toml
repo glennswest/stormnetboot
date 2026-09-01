@@ -1,9 +1,10 @@
 [package]
 name = "stormnetboot-init"
-description = "placeholder"
+description = "Initramfs init: brings root up over NVMe/TCP and switch_roots into stormcos"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true

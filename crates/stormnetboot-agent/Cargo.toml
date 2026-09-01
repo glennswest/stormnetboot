@@ -1,9 +1,12 @@
 [package]
 name = "stormnetboot-agent"
-description = "placeholder"
+description = "Reports node boot and assimilation progress to stormnetboot-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
