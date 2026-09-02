@@ -36,6 +36,7 @@ in megabytes.
 
 | Project | Role in this design |
 |---|---|
+| [`stormbootx`](https://github.com/glennswest/stormbootx) | **The USB boot agent.** A 45 KB UEFI application: service tag from SMBIOS, `nvme-tcp://` attach over `EFI_TCP4`, published as `EFI_BLOCK_IO_PROTOCOL`. Its own repo — it is `no_std`, edition 2021 and targets `x86_64-unknown-uefi`, so it never fitted this workspace. |
 | `stormblock` | The engine. NVMe-oF/TCP target (`:4420`), its own NVMe/TCP *initiator* (`nvme-tcp://` device URIs), ublk local export, pallets API (`:9090`), `boot-local --local-disk` flow-over ("zeroboot"). Explicitly not responsible for PXE. |
 | `stormblock-registry` (sbregistry) | Source of truth for content: OCI pallet/stack artifacts, signed boot pallets (kernel + initramfs + cmdline), goldens → per-host CoW clones with NVMe/TCP attach info (`/v1/clones/claim`). |
 | `stormcos` | The OS being booted. Kernel already validated for `NVME_TCP`, `BLK_DEV_UBLK`, `EROFS_FS`. Its architecture doc names the netboot leg as the open question — stormnetboot is that leg. |
