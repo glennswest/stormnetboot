@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### 2026-09-02
+- **fix(media):** `build-boot-media.sh` died with no message once the UKI got
+  large. Three `objdump | awk ... exit` pipelines closed the pipe before
+  objdump had finished writing; objdump took SIGPIPE, and `set -o pipefail`
+  turned that into exit 141 — after the assignment had already succeeded, so
+  the script produced no output and named nothing. It fires deterministically
+  once objdump's output exceeds the pipe buffer, which a 48 MB initramfs and a
+  17 MB kernel guarantee. Every awk now reads its input to completion and
+  prints in `END`.
+
 ## [v0.4.0] — 2026-09-01
 
 ### Added

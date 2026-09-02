@@ -163,7 +163,13 @@ EOF
 # new sections above it at SectionAlignment.
 align() { local v=$1 a=$2; echo $(( (v + a - 1) / a * a )); }
 
-SECT_ALIGN=$(( 0x$(objdump -p "$STUB" | awk '/SectionAlignment/ {print $2; exit}') ))
+# Every objdump here is read to completion. `awk ... exit` closes the pipe
+# early, objdump dies of SIGPIPE, and `set -o pipefail` turns that into a
+# build failure — deterministically once the UKI is large enough that objdump
+# has not already finished writing. It cost a build of every boot image whose
+# initramfs crossed the pipe buffer, and it reported itself as nothing at all:
+# the assignment succeeds, the script exits 141, no message.
+SECT_ALIGN=$(( 0x$(objdump -p "$STUB" | awk '/SectionAlignment/ && !f {v=$2; f=1} END {print v}') ))
 [[ "$SECT_ALIGN" -gt 0 ]] || SECT_ALIGN=$(( 0x1000 ))
 
 stub_end=0
@@ -190,10 +196,10 @@ objcopy \
 # handing back a UKI that boots to a blank screen. Check the result rather than
 # the exit status: every section must be present, non-empty, and at or above
 # the image base.
-IMAGE_BASE=$(( 0x$(objdump -p "$WORK/boot.efi" | awk '/ImageBase/ {print $2; exit}') ))
+IMAGE_BASE=$(( 0x$(objdump -p "$WORK/boot.efi" | awk '/ImageBase/ && !f {v=$2; f=1} END {print v}') ))
 for section in .osrel .cmdline .linux .initrd; do
     read -r size vma < <(objdump -h "$WORK/boot.efi" \
-        | awk -v s="$section" '$2 == s {print $3, $4; exit}')
+        | awk -v s="$section" '$2 == s && !f {a=$3; b=$4; f=1} END {print a, b}')
     [[ -n "${size:-}" ]] || die "UKI is missing the $section section"
     (( 0x$size > 0 ))    || die "UKI section $section is empty"
     (( 0x$vma >= IMAGE_BASE )) \
