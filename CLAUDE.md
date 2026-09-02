@@ -36,6 +36,20 @@ place to change.
   decides whether a bulk cold boot of a cluster comes back as that cluster or
   as N unidentified nodes. The v0.2.0 data-slab guard already refuses to
   format it — the protection exists, the read does not.
+- **Adding and removing nodes is the same method.** Scale up = power on a
+  node, let it boot, assimilate and join. Scale down = **revert it to a SNO
+  node**, from which it can rejoin later. There is no separate provisioning
+  path and no separate scale path — it is all the one flow above.
+- **It reduces to one predicate: is this node ready to be added, or does it
+  need an upgrade?** Ready → join. Not ready → **a cold refresh is better**
+  than upgrading it, then join. Corollary: **joining is never an
+  upgrade-in-place.** Method 2 below is for nodes already in the cluster;
+  anything joining or out of date takes method 1.
+  The predicate has three consumers and must be one implementation: the USB
+  agent's fall-through check, the scale-up gate, and the scale-down/revert
+  decision. It belongs as a **condition on the node's resource** so an
+  operator and the scheduler can both ask it — which is the shape
+  `boothost.rs` already implements.
 - **Two update methods, and they are different machines:**
   1. **Total rewrite (mostly)** — BMC power-cycles the metal, it comes up on
      the USB agent and reinstalls. Wipe / install / bulk upgrade; can be done
@@ -247,9 +261,12 @@ place to change.
       filenames so `nvme-tcp.ko.xz` failed every build, and UKI section VMAs
       derived from the stub's file size land below its non-zero `ImageBase`,
       which objcopy warns about and then exits 0 on.
-- [ ] Phase 11 — the USB boot agent's decision. Fall through to the local disk
-      when no update is needed (v0.4.0 always attaches), and read the
-      surviving data partition so a returning node comes back as itself
+- [ ] Phase 11 — the readiness predicate, and the agent's decision from it.
+      One implementation answering "is this node ready, or does it need a
+      refresh?", surfaced as a condition on the resource and consumed by all
+      three callers: the USB agent's fall-through to the local disk (v0.4.0
+      always attaches), the scale-up gate, and scale-down/revert-to-SNO. Reads
+      the surviving data partition so a returning node comes back as itself
       instead of SNO-shaped.
 - [ ] Phase 12 — source the root from a CoW ISO clone on `forge.g16.lo`
       rather than an sbregistry golden. `claims.rs` already speaks the claim
