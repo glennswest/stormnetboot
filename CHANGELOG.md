@@ -11,6 +11,18 @@
   once objdump's output exceeds the pipe buffer, which a 48 MB initramfs and a
   17 MB kernel guarantee. Every awk now reads its input to completion and
   prints in `END`.
+- **docs:** The PXE chain is retired. README and CLAUDE.md now open with the
+  current architecture — a USB-stick all-Rust boot agent over a BIOS
+  NVMe-over-TCP extension, falling through to the local disk when no update is
+  needed and otherwise attaching a CoW ISO clone from `forge.g16.lo`; no PXE,
+  TFTP, DHCP boot options, HTTP first hop or microdns. Records the two update
+  methods (total rewrite via BMC cold boot; upgrade-in-place via OpenShift-style
+  rolling restarts on a live system), the surviving data partition that lets a
+  returning node come back as itself, and that BMC power control plus
+  install-progress interaction is still required and unwritten. Adds a
+  reuse/dead table over the existing crates and phases 11-14. No code change:
+  `ipxe.rs` and `/boot.ipxe` are marked obsolete but left in-tree while the
+  rewrite settles.
 
 ## [v0.4.0] — 2026-09-01
 

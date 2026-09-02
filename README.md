@@ -1,16 +1,36 @@
 # stormnetboot
 
-Componentized network boot for the Storm platform. A machine PXE-boots a tiny
-payload (iPXE → kernel + ~5 MB initramfs), brings its root up over **NVMe/TCP**
-from a stormblock appliance, and then — while running — **zeroboots** (flows
-over) the assets onto its local system disk. The same service drives upgrades
-and bare-metal recovery. It replaces the monolithic install ISO / disk image
-with a boot payload measured in megabytes.
+> **The PXE chain is retired (2026-09-02).** A machine boots a small all-Rust
+> agent from a **USB stick** — first boot device, local disk second — over a
+> BIOS NVMe-over-TCP extension. The agent asks whether a full update is needed;
+> if not it **falls through to the local disk**, and if so it attaches a **CoW
+> clone of an ISO on `forge.g16.lo` over NVMe/TCP** and boots that. Because it
+> is an ISO the node assimilates itself. No PXE, no TFTP, no DHCP boot options,
+> no HTTP first hop, and no microdns: **sbregistry and a USB stick, over TCP.**
+> v0.4.0 built the first half of this (direct UKI boot media, `nvme-tcp://` the
+> only transport). Sections below still describing the PXE first hop, iPXE
+> chainloading, TFTP or DHCP boot options describe the retired design and are
+> being rewritten; `crates/stormnetboot-server/src/ipxe.rs` and the
+> `/boot.ipxe` route are obsolete and still in-tree.
+>
+> **Two update methods, deliberately different machines.** (1) *Total rewrite* —
+> BMC power-cycles the metal, it comes up on the USB agent and reinstalls; this
+> is wipe, install and bulk upgrade, and it can be done to every node in a
+> cluster at once. (2) *Upgrade in place* — the OpenShift upgrade: rolling
+> restarts on masters then nodes, on a live system, no cold boot. A/B rollover
+> belongs to (2).
+>
+> **BMC is still required**: power control is what triggers method (1), and it
+> is also how install progress is watched. That half reuses this project's
+> progress machinery — `BootHost` status, the agent's phase reporting, the
+> console feed.
 
-stormnetboot is part of the PXE-chain rewrite: the legacy chain (pxemanager, a
-monolithic Go binary on RouterOS) is replaced by storm-native components that
-**stormcos itself hosts**. The boot server is not a special appliance — it is a
-component running on a stormcos node, projecting signed pallets over HTTP/TFTP.
+Componentized network boot for the Storm platform. A machine boots a tiny
+payload, brings its root up over **NVMe/TCP** from a stormblock appliance, and
+then — while running — **zeroboots** (flows over) the assets onto its local
+system disk. The same service drives upgrades and bare-metal recovery. It
+replaces the monolithic install ISO / disk image with a boot payload measured
+in megabytes.
 
 ## Where it sits
 

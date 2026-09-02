@@ -1,15 +1,76 @@
 # CLAUDE.md — stormnetboot
 
-Componentized network boot for the Storm platform: PXE → tiny kernel/initramfs
-→ root over NVMe/TCP from a stormblock appliance → zeroboot flow-over to local
-disk. Same service handles upgrades and recovery. See `README.md` for the full
+Componentized boot for the Storm platform: USB-stick boot agent → root over
+NVMe/TCP from a stormblock appliance → zeroboot flow-over to local disk. Same
+service handles upgrades and recovery. See `README.md` for the full
 architecture; this file tracks state and the work plan.
+
+**Read this before believing anything below about PXE.** The PXE chain was
+retired 2026-09-02. Phase 10 (v0.4.0) already replaced the first hop with
+direct UKI boot media; the remaining PXE code and prose are obsolete and
+being removed. A previous session read the old framing at the top of these
+files and confidently described a design that had been dead for a day —
+which is what this note exists to prevent.
 
 ## Version
 
 `0.4.0`, set once in the workspace `Cargo.toml` (`workspace.package.version`);
 all three crates inherit it with `version.workspace = true`, so there is one
 place to change.
+
+## The current architecture (2026-09-02)
+
+- **Boot is a USB stick, not a network.** A small all-Rust agent (~30k) on a
+  USB stick, built on a **BIOS NVMe-over-TCP extension**. The stick is boot
+  device #1, the local disk #2. The agent checks whether a full update is
+  needed; **if not it falls through to the local disk**. If so it attaches a
+  **CoW clone of an ISO on `forge.g16.lo`** over NVMe/TCP and boots it. It is
+  an ISO, so the node assimilates itself.
+- **`forge.g16.lo`** (stood up 2026-09-02, high-speed net) is the build
+  destination and the source of those ISO clones.
+- **What goes away:** PXE, TFTP, DHCP boot options, the HTTP first hop, and
+  **microdns**. What is left is **sbregistry + a USB stick, over TCP**.
+- **A data partition survives the reinstall**, so a returning node may already
+  know what it is. Two exits from assimilation: fresh metal (SNO-shaped,
+  identity assigned later) and returning metal (resumes as itself). This also
+  decides whether a bulk cold boot of a cluster comes back as that cluster or
+  as N unidentified nodes. The v0.2.0 data-slab guard already refuses to
+  format it — the protection exists, the read does not.
+- **Two update methods, and they are different machines:**
+  1. **Total rewrite (mostly)** — BMC power-cycles the metal, it comes up on
+     the USB agent and reinstalls. Wipe / install / bulk upgrade; can be done
+     to every node in a cluster at once.
+  2. **Upgrade in place** — the OpenShift upgrade: rolling restarts on masters
+     then nodes, on a **live system**. No cold boot. A/B rollover belongs here.
+- **BMC is still required, and is not optional**: power control triggers
+  method 1, and it is how **install progress** is watched. Greenfield Rust —
+  no Rust IPMI/Redfish in-tree; the Go bmh-operator serves until core cutover.
+
+### What is reusable, and what is dead
+
+| In-tree | Verdict |
+|---|---|
+| `stormnetboot-server/src/ipxe.rs`, `/boot.ipxe`, kernel+initramfs HTTP serving | **dead** — the first hop it serves no longer exists |
+| hosts file / microdns / DHCP framing in the docs | **dead** |
+| `boothost.rs` + `kube_store.rs` (CRD, status write-back, conditions) | **reuse** — this is the install-progress surface the BMC half needs |
+| `stormnetboot-agent` (phase reporting, flow-over log follow, inventory) | **reuse** — progress from a live node, unchanged |
+| `state.rs` (bounded fleet phase tracking, eviction, counts) | **reuse** |
+| `components.rs` (stormview feed), `metrics.rs` | **reuse** |
+| `pallet.rs`, `stormsig.rs`, `claims.rs` (sbregistry, signatures, CoW claims) | **reuse** — the ISO clone comes the same way |
+| `mac.rs` | **reuse** — host matching |
+| `stormnetboot-init` + `media.rs` + `build-boot-media.sh` (v0.4.0) | **keep and extend** — this is the first half of the new flow |
+
+### Gaps between v0.4.0 and the flow above
+
+1. **No fall-through.** v0.4.0's media always attaches its root; the agent
+   should check, and boot the local disk when no update is needed.
+2. **Wrong source.** It attaches sbregistry goldens, not a CoW ISO clone from
+   `forge.g16.lo`.
+3. **Not A/B.** Self-refresh rewrites the one ESP in place; A/B rollover is
+   method 2's machinery and does not exist.
+4. **Data partition not read.** Nothing consumes surviving identity, so every
+   node still comes up SNO-shaped.
+5. **No BMC at all.** Power control and progress interaction are unwritten.
 
 ## Context that is easy to lose
 
@@ -186,6 +247,22 @@ place to change.
       filenames so `nvme-tcp.ko.xz` failed every build, and UKI section VMAs
       derived from the stub's file size land below its non-zero `ImageBase`,
       which objcopy warns about and then exits 0 on.
+- [ ] Phase 11 — the USB boot agent's decision. Fall through to the local disk
+      when no update is needed (v0.4.0 always attaches), and read the
+      surviving data partition so a returning node comes back as itself
+      instead of SNO-shaped.
+- [ ] Phase 12 — source the root from a CoW ISO clone on `forge.g16.lo`
+      rather than an sbregistry golden. `claims.rs` already speaks the claim
+      protocol; the artifact changes, the transport does not.
+- [ ] Phase 13 — BMC: power control (what triggers a total rewrite) and
+      install-progress interaction. Greenfield Rust IPMI/Redfish. The
+      progress half reuses `boothost.rs`, `kube_store.rs`,
+      `stormnetboot-agent` and `state.rs` — see the reuse table above.
+- [ ] Phase 14 — A/B rollover for upgrade-in-place (method 2). Distinct from
+      the media self-refresh, which rewrites one ESP for method 1.
+- [ ] Remove the dead PXE surface: `ipxe.rs`, the `/boot.ipxe` route, the
+      kernel/initramfs HTTP serving, and the PXE/microdns prose in README.md.
+      Left in place today only because the rewrite is still settling.
 - [ ] Next — publish a real boot pallet and run a machine through the whole
       chain on the appliance VM, against a live rustkube apiserver. Nothing in
       phase 9 has met a real apiserver yet: no cluster was reachable from the
