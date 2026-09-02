@@ -5,6 +5,14 @@ members = [
     "crates/stormnetboot-init",
     "crates/stormnetboot-agent",
 ]
+# stormbootx builds for x86_64-unknown-uefi, is no_std, and has its own
+# edition and dependency set. A workspace member is built for the host
+# target by a bare `cargo build`, which for a UEFI binary fails in a way
+# that says nothing useful — so it is excluded and built explicitly:
+#
+#   cargo build --release --target x86_64-unknown-uefi \
+#       --manifest-path crates/stormbootx/Cargo.toml
+exclude = ["crates/stormbootx"]
 
 [workspace.package]
 version = "0.4.0"

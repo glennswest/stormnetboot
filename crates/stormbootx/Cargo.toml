@@ -1,0 +1,20 @@
+[package]
+name = "stormbootx"
+description = "UEFI NVMe/TCP boot extension: claim an image by service tag and publish it as EFI_BLOCK_IO_PROTOCOL"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "stormbootx"
+path = "src/main.rs"
+
+[dependencies]
+uefi = { version = "0.39", features = ["alloc", "global_allocator", "panic_handler", "logger"] }
+uefi-raw = "0.15"
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
