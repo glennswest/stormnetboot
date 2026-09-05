@@ -61,7 +61,13 @@ pub fn run(params: &BootParams, reporter: &Reporter) -> anyhow::Result<()> {
 
     reporter.phase("assets-fetched", None);
 
-    let mut engine = start_engine(params).context("starting stormblock")?;
+    // Where the root slab actually is. A named local slab is trusted only on
+    // positive evidence; a diskless node (or one whose named slab is a stray
+    // device — a 2 TB disk from a previous life, an empty virtual floppy that
+    // answers ENOMEDIUM) claims from the appliance, keyed on its service tag.
+    let slabs = resolve_slabs(params).context("resolving the root slab")?;
+
+    let mut engine = start_engine(params, &slabs).context("starting stormblock")?;
     wait_for_device(ROOT_DEV, DEVICE_TIMEOUT).inspect_err(|_| {
         // The engine's own output is the only diagnosis available here.
         let _ = engine.kill();
@@ -200,19 +206,147 @@ fn first_ethernet() -> Option<String> {
 
 /// Start the engine in the background. It must outlive `switch_root`: it is
 /// what serves `/dev/ublkb0`, so killing it unmounts root.
-fn start_engine(params: &BootParams) -> anyhow::Result<std::process::Child> {
+/// The ordered slabs to hand `boot-local`.
+///
+/// Without a boothost this is the classic path — `all_slabs()`, an `nvme-tcp://`
+/// URI and/or the named local slabs, exactly as given. With a boothost, a named
+/// local slab is a *hint*: trusted only when it proves to be a slab, dropped
+/// otherwise, and if none survives, the appliance is asked. That is what keeps
+/// a stray `/dev/sda` — the WD disk from a previous life, or the iDRAC virtual
+/// floppy that wins `/dev/sda` this boot and answers ENOMEDIUM — from being
+/// handed to the engine and killing the boot on "No medium found".
+fn resolve_slabs(params: &BootParams) -> anyhow::Result<Vec<String>> {
+    let Some((boothost, tag, namespace)) = params.boothost_claim() else {
+        return Ok(params.all_slabs());
+    };
+
+    let mut slabs: Vec<String> = Vec::new();
+    let mut have_root = false;
+    for slab in &params.slabs {
+        if slab.contains("://") || is_slab(slab) {
+            slabs.push(slab.clone());
+            have_root = true;
+        } else {
+            stamp(&format!("{slab} is not a slab — asking {boothost} instead"));
+        }
+    }
+
+    if !have_root {
+        stamp(&format!("asking {boothost} which image {tag} boots"));
+        let uri = boot_claim(boothost, tag, namespace, params.hostnqn.as_deref())?;
+        stamp(&format!("claimed root: {uri}"));
+        slabs.insert(0, uri);
+    }
+
+    // The data slab is attached like any other; it is tracked separately only
+    // because nothing may format it.
+    if let Some(data) = &params.data_slab
+        && !slabs.iter().any(|s| s == data)
+    {
+        slabs.push(data.clone());
+    }
+    Ok(slabs)
+}
+
+/// Is `dev` genuinely a stormblock slab?
+///
+/// Positive evidence only. `stormblock slab list <dev>` prints a
+/// `: slab <uuid>` line for a real slab and something else — "not a slab",
+/// "cannot open", or nothing at all for an empty removable that answers
+/// ENOMEDIUM — otherwise. The absence of a *known* error is not proof a device
+/// is a slab; the first version of this probe learned that on a machine whose
+/// `/dev/sda` was sometimes a disk and sometimes an empty floppy.
+fn is_slab(dev: &str) -> bool {
+    if !Path::new(dev).exists() {
+        return false;
+    }
+    let Ok(out) = Command::new(STORMBLOCK)
+        .arg("slab")
+        .arg("list")
+        .arg(dev)
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().any(is_slab_line)
+}
+
+/// A `stormblock slab list` line that names a slab: `<dev>: slab <uuid> (...)`.
+fn is_slab_line(line: &str) -> bool {
+    let Some((_, rest)) = line.split_once(": slab ") else {
+        return false;
+    };
+    // A 36-char UUID follows. Cheap structural check; the engine is the
+    // authority, this only decides whether to trust or to ask.
+    let id: String = rest.chars().take_while(|c| *c != ' ').collect();
+    id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+/// Claim this machine's image from the appliance, keyed on the service tag.
+///
+/// `stormblock boot-claim` prints the `nvme-tcp://` attach URI on stdout and
+/// nothing else, so it is used directly as a slab. Diagnostics are on stderr,
+/// inherited so they reach the console.
+fn boot_claim(
+    boothost: &str,
+    tag: &str,
+    namespace: &str,
+    hostnqn: Option<&str>,
+) -> anyhow::Result<String> {
+    let mut cmd = Command::new(STORMBLOCK);
+    cmd.arg("boot-claim")
+        .arg("--boothost")
+        .arg(boothost)
+        .arg("--tag")
+        .arg(tag);
+    if namespace != "boothost" {
+        cmd.arg("--namespace").arg(namespace);
+    }
+    if let Some(nqn) = hostnqn {
+        cmd.env("STORMBLOCK_HOST_NQN", nqn);
+    }
+    let out = cmd
+        .stderr(Stdio::inherit())
+        .output()
+        .context("running stormblock boot-claim")?;
+    if !out.status.success() {
+        bail!("no image is assigned to {tag} on {boothost} (boot-claim failed)");
+    }
+    let uri = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if uri.is_empty() {
+        bail!("boot-claim for {tag} returned no attach URI");
+    }
+    Ok(uri)
+}
+
+fn start_engine(
+    params: &BootParams,
+    slabs: &[String],
+) -> anyhow::Result<std::process::Child> {
     let mut cmd = Command::new(STORMBLOCK);
     cmd.arg("boot-local");
+
+    // One identity for every connect this boot makes, composed by the firmware
+    // and echoed here rather than re-derived: the format lives in stormbootx.
+    // The target binds the claimed clone to this NQN, so the kernel-side attach
+    // must present the same one or the connect is refused.
+    if let Some(nqn) = &params.hostnqn {
+        cmd.env("STORMBLOCK_HOST_NQN", nqn);
+    }
 
     // A remote namespace and a local partition are the same thing to the
     // engine: both are just a slab it is handed, and `--slab` has always been
     // repeatable. The system slab carries what an image replaces; the data
     // slab carries what must outlive it.
-    let slabs = params.all_slabs();
     if slabs.is_empty() {
         bail!("no slab to boot from");
     }
-    for slab in &slabs {
+    for slab in slabs {
         cmd.arg("--slab").arg(slab);
     }
 
@@ -396,6 +530,19 @@ mod tests {
     }
 
     #[test]
+    fn is_a_slab_line_only_on_positive_evidence() {
+        assert!(is_slab_line(
+            "/dev/sdb: slab 7661cf8b-1a2b-4c3d-9e5f-0a1b2c3d4e5f (role=data, tier=hot)"
+        ));
+        // Absence of a known error is not evidence.
+        assert!(!is_slab_line("/dev/sda: not a slab"));
+        assert!(!is_slab_line("/dev/sda: cannot open: No medium found"));
+        assert!(!is_slab_line(""));
+        // A truncated or non-hex id is not a slab.
+        assert!(!is_slab_line("/dev/sdb: slab 7661cf8b (role=data)"));
+        assert!(!is_slab_line("/dev/sdb: slab zzzzzzzz-1a2b-4c3d-9e5f-0a1b2c3d4e5f"));
+    }
+
     fn waiting_for_a_missing_device_names_what_was_there() {
         let err = wait_for_device("/dev/definitely-not-here", Duration::from_millis(300))
             .unwrap_err()

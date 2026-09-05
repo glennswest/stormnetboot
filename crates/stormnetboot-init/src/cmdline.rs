@@ -46,6 +46,27 @@ pub struct BootParams {
     /// one thing an install must never format. Re-minting tier-0 silently
     /// invalidates every ServiceAccount token in the cluster.
     pub data_slab: Option<String>,
+    /// The appliance to claim this machine's image from, keyed on the service
+    /// tag — the diskless path. `http://host:port`.
+    ///
+    /// A node netboots once to install itself and then boots from the disk it
+    /// installed onto, with the *same* cmdline, because the cmdline is a pallet
+    /// member. So a named local slab is tried first and the appliance is the
+    /// fallback: on the bootstrap boot the disk holds no slab and the node
+    /// asks; after the install it does, and stops asking. Nothing is rewritten
+    /// between the two.
+    pub boothost: Option<String>,
+    /// The machine's identity, exactly as the `boothost/<tag>` synonym names
+    /// it. Not discovered here: stormbootx read it from SMBIOS and claimed on
+    /// it before Linux existed, and this hands that same string down. Two
+    /// implementations of "who is this machine" drift.
+    pub tag: Option<String>,
+    /// Synonym namespace holding the per-machine decision (default `boothost`).
+    pub namespace: Option<String>,
+    /// The initiator NQN every connect this boot makes presents, composed by
+    /// firmware and echoed here so the target recognises the node across the
+    /// firmware→kernel handover. Absent means connecting anonymously.
+    pub hostnqn: Option<String>,
     /// The ESP this machine booted from, when it booted from local media
     /// rather than PXE.
     ///
@@ -83,6 +104,12 @@ impl BootParams {
                         .extend(value.split(',').filter(|s| !s.is_empty()).map(str::to_owned));
                 }
                 "rd.stormblock.data-slab" => p.data_slab = Some(value.to_owned()),
+                // The diskless claim: appliance + identity, handed down from
+                // the firmware stage rather than rediscovered.
+                "rd.stormblock.boothost" => p.boothost = Some(value.to_owned()),
+                "rd.stormblock.tag" => p.tag = Some(value.to_owned()),
+                "rd.stormblock.namespace" => p.namespace = Some(value.to_owned()),
+                "rd.stormblock.hostnqn" => p.hostnqn = Some(value.to_owned()),
                 // Ours, not the engine's: the engine has no concept of the
                 // media the machine booted from.
                 "rd.stormnetboot.media" => p.media_dev = Some(value.to_owned()),
@@ -112,7 +139,22 @@ impl BootParams {
 
     /// Whether this is a network boot at all.
     pub fn is_network_boot(&self) -> bool {
-        self.nvme_uri().is_some()
+        self.nvme_uri().is_some() || self.boothost_claim().is_some()
+    }
+
+    /// The appliance claim to make, if the command line asks for one:
+    /// `(boothost, tag, namespace)` with the namespace defaulted.
+    ///
+    /// `boothost` without `tag` is not a claim — a node cannot claim without
+    /// knowing which machine it is — so this returns `None` and `missing()`
+    /// names the gap rather than guessing.
+    pub fn boothost_claim(&self) -> Option<(&str, &str, &str)> {
+        match (self.boothost.as_deref(), self.tag.as_deref()) {
+            (Some(host), Some(tag)) => {
+                Some((host, tag, self.namespace.as_deref().unwrap_or("boothost")))
+            }
+            _ => None,
+        }
     }
 
     /// Every slab to attach, in order: the root source first, then the data
@@ -169,6 +211,9 @@ impl BootParams {
         }
         if self.nqn.is_none() {
             missing.push("rd.stormblock.nqn");
+        }
+        if self.boothost.is_some() && self.tag.is_none() {
+            missing.push("rd.stormblock.tag");
         }
         missing
     }
@@ -359,4 +404,24 @@ mod tests {
         assert!(p.check_local_disk().is_err());
     }
 
+
+    #[test]
+    fn boothost_claim_needs_both_host_and_tag() {
+        let p = BootParams::parse(
+            "rd.stormblock.boothost=http://a:9090 rd.stormblock.tag=C2NR0Q2",
+        );
+        assert_eq!(p.boothost_claim(), Some(("http://a:9090", "C2NR0Q2", "boothost")));
+        assert!(p.is_network_boot());
+
+        // boothost without tag is not a claim, and it is a nameable gap.
+        let p = BootParams::parse("rd.stormblock.boothost=http://a:9090");
+        assert_eq!(p.boothost_claim(), None);
+        assert!(p.missing().contains(&"rd.stormblock.tag"));
+
+        // an explicit namespace overrides the default.
+        let p = BootParams::parse(
+            "rd.stormblock.boothost=http://a:9090 rd.stormblock.tag=T rd.stormblock.namespace=lab",
+        );
+        assert_eq!(p.boothost_claim(), Some(("http://a:9090", "T", "lab")));
+    }
 }
