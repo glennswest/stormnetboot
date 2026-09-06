@@ -226,6 +226,29 @@ impl BootParams {
         }
     }
 
+    /// Compute the ublk export layout — see [`ExportPlan`].
+    pub fn export_plan(&self) -> ExportPlan {
+        let mut plan = ExportPlan::default();
+        let mut idx = 1u32; // ublkb0 is root
+        if self.image_store.is_some() {
+            plan.image_store = Some(("/dev/ublkb1".into(), IMAGE_STORE_MOUNT.into()));
+            idx = 2;
+        }
+        for (name, mnt) in &self.writable {
+            plan.writable_args.push(name.clone());
+            if let Some(m) = mnt {
+                plan.fstab_writable.push((format!("/dev/ublkb{idx}"), m.clone()));
+            }
+            idx += 1;
+        }
+        for (name, mnt) in &self.mounts {
+            plan.writable_args.push(name.clone());
+            plan.mount_map.push((format!("/dev/ublkb{idx}"), mnt.clone()));
+            idx += 1;
+        }
+        plan
+    }
+
     /// Every slab to attach, in order: the root source first, then the data
     /// slab, then any others named.
     ///
