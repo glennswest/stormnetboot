@@ -250,7 +250,7 @@ fn read_pallet(path: &Path) -> Option<String> {
 fn short(digest: &str) -> String {
     let bare = digest.strip_prefix("sha256:").unwrap_or(digest);
     if bare.len() > 12 {
-        format!("{}…", &bare[..12])
+        format!("{}...", &bare[..12])
     } else {
         bare.to_owned()
     }
@@ -322,7 +322,7 @@ mod tests {
 
     #[test]
     fn short_trims_the_prefix_and_the_tail() {
-        assert_eq!(short("sha256:0123456789abcdef0123"), "0123456789ab…");
+        assert_eq!(short("sha256:0123456789abcdef0123"), "0123456789ab...");
         assert_eq!(short("short"), "short");
     }
 }

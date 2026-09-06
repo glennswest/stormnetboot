@@ -238,7 +238,7 @@ fn resolve_slabs(params: &BootParams) -> anyhow::Result<Vec<String>> {
             slabs.push(slab.clone());
             have_root = true;
         } else {
-            stamp(&format!("{slab} is not a slab — asking {boothost} instead"));
+            stamp(&format!("{slab} is not a slab - asking {boothost} instead"));
         }
     }
 
