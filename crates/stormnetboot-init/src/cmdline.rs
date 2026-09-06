@@ -67,6 +67,24 @@ pub struct BootParams {
     /// firmware and echoed here so the target recognises the node across the
     /// firmware→kernel handover. Absent means connecting anonymously.
     pub hostnqn: Option<String>,
+    /// Metadata directory for `boot-local` (`--meta`), holding volumes.dat.
+    pub meta: Option<String>,
+    /// A preloaded erofs image store, exported right after root (ublkb1) and
+    /// mounted read-only — the build-time preload CRI-O serves from so a fresh
+    /// node never pulls.
+    pub image_store: Option<String>,
+    /// Immutable-root overlay: a read-only root as the lower dir, a writable
+    /// upper on `tmpfs[:SIZE]` or a block device.
+    pub overlay: Option<String>,
+    /// Writable thin volumes, `name[:/mount]` — each exported as a ublk device
+    /// after root/image-store and registered in the real root's fstab (systemd
+    /// formats and grows it). A bare name with no `:/mount` is exported but
+    /// left for the OS to place.
+    pub writable: Vec<(String, Option<String>)>,
+    /// Volumes this init mounts itself before PID 1, `name:/mount` — a stormpump
+    /// node's boot manifest registers directories, so a container's volume has
+    /// to be a mounted directory before PID 1 reads the manifest.
+    pub mounts: Vec<(String, String)>,
     /// The ESP this machine booted from, when it booted from local media
     /// rather than PXE.
     ///
@@ -76,6 +94,44 @@ pub struct BootParams {
     /// recoverable. Absent means the media refresh does not run at all.
     pub media_dev: Option<String>,
 }
+
+/// One `name:/mount` list from the command line into `(name, Some(mount))`
+/// pairs; a bare `name` (no colon) becomes `(name, None)`.
+fn parse_named_mounts(value: &str) -> Vec<(String, Option<String>)> {
+    value
+        .split(',')
+        .filter(|e| !e.is_empty())
+        .map(|entry| match entry.split_once(':') {
+            Some((name, mnt)) if !name.is_empty() && !mnt.is_empty() => {
+                (name.to_owned(), Some(mnt.to_owned()))
+            }
+            // `name:` or `:mount` is malformed; keep the name, drop the mount.
+            Some((name, _)) => (name.to_owned(), None),
+            None => (entry.to_owned(), None),
+        })
+        .collect()
+}
+
+/// Where each exported volume lands as a ublk device, computed once so the
+/// `--writable` order handed to `boot-local` and the device→mount map applied
+/// afterwards cannot drift apart — the failure the shell init warned about.
+///
+/// Root is always `ublkb0`. An image store, if present, is `ublkb1`. Writables
+/// then mounts follow in order from there. The engine assigns indices in the
+/// order the `--writable` flags are given, so this builds both from one walk.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ExportPlan {
+    /// `--writable <name>` arguments, in export order.
+    pub writable_args: Vec<String>,
+    /// `(device, mount)` this init mounts under sysroot before PID 1.
+    pub mount_map: Vec<(String, String)>,
+    /// `(device, mount)` registered in the real root's fstab for systemd.
+    pub fstab_writable: Vec<(String, String)>,
+    /// The image store device and its mount, if one was preloaded.
+    pub image_store: Option<(String, String)>,
+}
+
+const IMAGE_STORE_MOUNT: &str = "/var/lib/stormcos/image-store";
 
 impl BootParams {
     pub fn parse(cmdline: &str) -> Self {
@@ -110,6 +166,19 @@ impl BootParams {
                 "rd.stormblock.tag" => p.tag = Some(value.to_owned()),
                 "rd.stormblock.namespace" => p.namespace = Some(value.to_owned()),
                 "rd.stormblock.hostnqn" => p.hostnqn = Some(value.to_owned()),
+                "rd.stormblock.meta" => p.meta = Some(value.to_owned()),
+                "rd.stormblock.image-store" => p.image_store = Some(value.to_owned()),
+                "rd.stormblock.overlay" => p.overlay = Some(value.to_owned()),
+                "rd.stormblock.writable" => p.writable = parse_named_mounts(value),
+                // A mount without a path is useless — the whole point is where
+                // it lands — so those are dropped here rather than exported to
+                // nowhere.
+                "rd.stormblock.mount" => {
+                    p.mounts = parse_named_mounts(value)
+                        .into_iter()
+                        .filter_map(|(n, m)| m.map(|m| (n, m)))
+                        .collect();
+                }
                 // Ours, not the engine's: the engine has no concept of the
                 // media the machine booted from.
                 "rd.stormnetboot.media" => p.media_dev = Some(value.to_owned()),
@@ -423,5 +492,45 @@ mod tests {
             "rd.stormblock.boothost=http://a:9090 rd.stormblock.tag=T rd.stormblock.namespace=lab",
         );
         assert_eq!(p.boothost_claim(), Some(("http://a:9090", "T", "lab")));
+    }
+
+    #[test]
+    fn export_plan_assigns_ublk_indices_in_order() {
+        // image-store takes ublkb1; writables then mounts follow from ublkb2.
+        let p = BootParams::parse(
+            "rd.stormblock.image-store=is              rd.stormblock.writable=var:/var,containers:/var/lib/containers              rd.stormblock.mount=fedora:/pallets/fedora,busybox:/pallets/busybox",
+        );
+        let plan = p.export_plan();
+        assert_eq!(
+            plan.writable_args,
+            vec!["var", "containers", "fedora", "busybox"]
+        );
+        assert_eq!(plan.image_store, Some(("/dev/ublkb1".into(), "/var/lib/stormcos/image-store".into())));
+        assert_eq!(
+            plan.fstab_writable,
+            vec![
+                ("/dev/ublkb2".to_string(), "/var".to_string()),
+                ("/dev/ublkb3".to_string(), "/var/lib/containers".to_string()),
+            ]
+        );
+        assert_eq!(
+            plan.mount_map,
+            vec![
+                ("/dev/ublkb4".to_string(), "/pallets/fedora".to_string()),
+                ("/dev/ublkb5".to_string(), "/pallets/busybox".to_string()),
+            ]
+        );
+
+        // No image-store: writables start at ublkb1.
+        let p = BootParams::parse("rd.stormblock.mount=stormblock:/pallets/stormblock");
+        let plan = p.export_plan();
+        assert_eq!(plan.writable_args, vec!["stormblock"]);
+        assert_eq!(plan.mount_map, vec![("/dev/ublkb1".to_string(), "/pallets/stormblock".to_string())]);
+
+        // A bare writable name with no mount is exported but not fstab'd.
+        let p = BootParams::parse("rd.stormblock.writable=scratch");
+        let plan = p.export_plan();
+        assert_eq!(plan.writable_args, vec!["scratch"]);
+        assert!(plan.fstab_writable.is_empty());
     }
 }

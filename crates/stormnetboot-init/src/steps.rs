@@ -67,7 +67,12 @@ pub fn run(params: &BootParams, reporter: &Reporter) -> anyhow::Result<()> {
     // answers ENOMEDIUM) claims from the appliance, keyed on its service tag.
     let slabs = resolve_slabs(params).context("resolving the root slab")?;
 
-    let mut engine = start_engine(params, &slabs).context("starting stormblock")?;
+    // Where each writable/mount/image-store volume lands as a ublk device. Both
+    // the --writable flags handed to the engine and the mounts applied
+    // afterwards come from this one plan, so their indices cannot drift.
+    let plan = params.export_plan();
+
+    let mut engine = start_engine(params, &slabs, &plan).context("starting stormblock")?;
     wait_for_device(ROOT_DEV, DEVICE_TIMEOUT).inspect_err(|_| {
         // The engine's own output is the only diagnosis available here.
         let _ = engine.kill();
@@ -76,7 +81,13 @@ pub fn run(params: &BootParams, reporter: &Reporter) -> anyhow::Result<()> {
     reporter.phase("root-attached", None);
     stamp("root device present");
 
-    mount_root()?;
+    mount_root(params)?;
+    // Mount container volumes and register writables/image-store in the real
+    // root's fstab, before PID 1 — a stormpump node's manifest registers
+    // directories, so a volume has to be a mounted directory by the time PID 1
+    // reads it. A volume that will not mount is reported and skipped, never
+    // fatal: one missing container beats a node that does not boot.
+    apply_exports(&plan);
     write_identity(params)?;
 
     // Runs with the root mounted and before the handover, so the golden that
@@ -327,6 +338,7 @@ fn boot_claim(
 fn start_engine(
     params: &BootParams,
     slabs: &[String],
+    plan: &crate::cmdline::ExportPlan,
 ) -> anyhow::Result<std::process::Child> {
     let mut cmd = Command::new(STORMBLOCK);
     cmd.arg("boot-local");
@@ -350,11 +362,22 @@ fn start_engine(
         cmd.arg("--slab").arg(slab);
     }
 
+    if let Some(meta) = &params.meta {
+        cmd.arg("--meta").arg(meta);
+    }
+    if let Some(store) = &params.image_store {
+        cmd.arg("--image-store").arg(store);
+    }
     if let Some(volume) = &params.volume {
         cmd.arg("--volume").arg(volume);
     }
     if let Some(disk) = &params.local_disk {
         cmd.arg("--local-disk").arg(disk);
+    }
+    // Writable thin volumes and mounts, in the order the plan assigned ublk
+    // indices — the engine numbers them by the order of these flags.
+    for name in &plan.writable_args {
+        cmd.arg("--writable").arg(name);
     }
 
     stamp(&format!("starting engine on {}", slabs.join(", ")));
@@ -402,24 +425,156 @@ fn wait_for_device(path: &str, timeout: Duration) -> anyhow::Result<()> {
     )
 }
 
-fn mount_root() -> anyhow::Result<()> {
+fn mount_root(params: &BootParams) -> anyhow::Result<()> {
+    if let Some(overlay) = &params.overlay {
+        return mount_overlay_root(overlay);
+    }
     std::fs::create_dir_all(SYSROOT).ok();
+    if mount_fs(ROOT_DEV, SYSROOT) {
+        stamp(&format!("mounted root {ROOT_DEV} on {SYSROOT}"));
+        return Ok(());
+    }
+    bail!("could not mount {ROOT_DEV} on {SYSROOT} as erofs, ext4 or auto")
+}
 
-    // stormcos root is erofs; ext4 is the fallback for a writable root. Try in
-    // that order rather than probing, so the common case costs one syscall.
+/// Mount a filesystem the stormcos way: erofs read-only first (the common
+/// case), then ext4, then let the kernel probe. Returns whether it mounted.
+fn mount_fs(dev: &str, mnt: &str) -> bool {
     for args in [
-        vec!["-t", "erofs", "-o", "ro", ROOT_DEV, SYSROOT],
-        vec!["-t", "ext4", ROOT_DEV, SYSROOT],
-        vec![ROOT_DEV, SYSROOT],
+        vec!["-t", "erofs", "-o", "ro", dev, mnt],
+        vec!["-t", "ext4", dev, mnt],
+        vec![dev, mnt],
     ] {
-        let status = Command::new("/bin/mount").args(&args).status();
-        if matches!(status, Ok(s) if s.success()) {
-            stamp(&format!("mounted root ({})", args.join(" ")));
-            return Ok(());
+        if matches!(Command::new("/bin/mount").args(&args).status(), Ok(s) if s.success()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Immutable-root overlay: the read-only root becomes the lower dir and a
+/// writable upper sits on tmpfs or a block device, so the running system can
+/// write while the image stays pristine.
+///
+///   rd.stormblock.overlay=tmpfs[:SIZE]   default 512m
+///   rd.stormblock.overlay=/dev/ublkbN    a pre-formatted writable volume
+fn mount_overlay_root(overlay: &str) -> anyhow::Result<()> {
+    const LOWER: &str = "/run/stormblock/lower";
+    const RW: &str = "/run/stormblock/rw";
+    std::fs::create_dir_all(SYSROOT).ok();
+    std::fs::create_dir_all(LOWER).ok();
+    std::fs::create_dir_all(RW).ok();
+
+    if !mount_fs(ROOT_DEV, LOWER) {
+        bail!("overlay: could not mount lower {ROOT_DEV}");
+    }
+
+    if let Some(size) = overlay.strip_prefix("tmpfs") {
+        let size = size.strip_prefix(':').unwrap_or("512m");
+        let ok = Command::new("/bin/mount")
+            .args(["-t", "tmpfs", "-o", &format!("size={size}"), "tmpfs", RW])
+            .status();
+        if !matches!(ok, Ok(s) if s.success()) {
+            bail!("overlay: could not mount tmpfs upper (size={size})");
+        }
+    } else {
+        wait_for_block(overlay, Duration::from_secs(15));
+        if !matches!(Command::new("/bin/mount").args([overlay, RW]).status(), Ok(s) if s.success()) {
+            bail!("overlay: could not mount upper {overlay}");
         }
     }
 
-    bail!("could not mount {ROOT_DEV} on {SYSROOT} as erofs, ext4 or auto")
+    let upper = format!("{RW}/upper");
+    let work = format!("{RW}/work");
+    std::fs::create_dir_all(&upper).ok();
+    std::fs::create_dir_all(&work).ok();
+    let opt = format!("lowerdir={LOWER},upperdir={upper},workdir={work}");
+    if !matches!(
+        Command::new("/bin/mount")
+            .args(["-t", "overlay", "overlay", "-o", &opt, SYSROOT])
+            .status(),
+        Ok(s) if s.success()
+    ) {
+        bail!("overlay: could not mount overlay root on {SYSROOT}");
+    }
+    stamp(&format!("overlay root: lower={ROOT_DEV} upper={overlay}"));
+    Ok(())
+}
+
+/// Apply the export plan once root is mounted: mount container volumes now,
+/// register writables and the image store in the real root's fstab for systemd.
+///
+/// Nothing here is fatal — a volume that will not mount is reported and left
+/// out. One container that cannot start is worth less than a node that will
+/// not boot, and the log names which one is missing.
+fn apply_exports(plan: &crate::cmdline::ExportPlan) {
+    for (dev, mnt) in &plan.mount_map {
+        if !wait_for_block(dev, Duration::from_secs(15)) {
+            tracing_warn(&format!("{dev} never appeared; {mnt} will be empty"));
+            continue;
+        }
+        let target = format!("{SYSROOT}{mnt}");
+        std::fs::create_dir_all(&target).ok();
+        if matches!(Command::new("/bin/mount").args([dev, &target]).status(), Ok(s) if s.success()) {
+            stamp(&format!("mounted {dev} -> {mnt}"));
+        } else {
+            tracing_warn(&format!("{dev} would not mount at {mnt}"));
+        }
+    }
+
+    // Writables: busybox has no mkfs.xfs, so hand them to systemd via fstab —
+    // x-systemd.makefs formats the empty volume on first boot, growfs grows it.
+    for (dev, mnt) in &plan.fstab_writable {
+        if wait_for_block(dev, Duration::from_secs(15)) {
+            append_fstab(&format!(
+                "{dev} {mnt} xfs defaults,x-systemd.makefs,x-systemd.growfs,nofail 0 0"
+            ));
+            stamp(&format!("writable {dev} -> {mnt}"));
+        } else {
+            tracing_warn(&format!("{dev} never appeared; {mnt} falls back to overlay"));
+        }
+    }
+
+    if let Some((dev, mnt)) = &plan.image_store {
+        if wait_for_block(dev, Duration::from_secs(15)) {
+            let target = format!("{SYSROOT}{mnt}");
+            std::fs::create_dir_all(&target).ok();
+            append_fstab(&format!("{dev} {mnt} erofs ro,nofail 0 0"));
+            stamp(&format!("image-store {dev} -> {mnt} (ro)"));
+        } else {
+            tracing_warn(&format!("image-store {dev} never appeared"));
+        }
+    }
+}
+
+/// Wait for a block device to appear (drivers export ublk devices
+/// asynchronously). Returns whether it is present within the timeout.
+fn wait_for_block(dev: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if Path::new(dev).exists() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Append a line to the real root's fstab. Failure is warned, not fatal — the
+/// volume is still exported, it just will not be mounted by systemd.
+fn append_fstab(line: &str) {
+    use std::io::Write as _;
+    let path = format!("{SYSROOT}/etc/fstab");
+    match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut f) => {
+            if let Err(err) = writeln!(f, "{line}") {
+                tracing_warn(&format!("could not append to {path}: {err}"));
+            }
+        }
+        Err(err) => tracing_warn(&format!("could not open {path}: {err}")),
+    }
 }
 
 /// Write the identity pinned at PXE time into the new root.
