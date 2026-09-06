@@ -648,6 +648,34 @@ impl ExecReplace for Command {
 }
 
 /// Hand the operator a shell rather than panicking the kernel.
+/// Hold the machine, saying so, forever.
+///
+/// Never a bare sleep. A node that stops silently is indistinguishable from a
+/// node that is wedged, powered off, or on the wrong network — and the whole
+/// reason this code exists is that a machine between power-on and cluster join
+/// has no other way to be seen. So it keeps saying what it is waiting on: to
+/// a console attached ten minutes later, and to the kernel log, which is what
+/// `dmesg` shows if anything ever does reach a shell.
+///
+/// `why` is printed every interval rather than once, because the operator who
+/// needs it is by definition not watching when it first appears.
+fn hold(why: &str) -> ! {
+    let mut n: u64 = 0;
+    loop {
+        eprintln!(
+            "stormnetboot-init: HELD ({n}m): {why}"
+        );
+        // Also to /dev/kmsg, so it survives a console that was not attached
+        // and shows up in dmesg for anyone who gets further than this.
+        if let Ok(mut k) = std::fs::OpenOptions::new().write(true).open("/dev/kmsg") {
+            use std::io::Write;
+            let _ = writeln!(k, "stormnetboot-init: HELD: {why}");
+        }
+        std::thread::sleep(Duration::from_secs(60));
+        n += 1;
+    }
+}
+
 /// Hand the operator a shell and never come back.
 ///
 /// `-> !` is the contract, not a decoration. This used to run the shell and
@@ -673,10 +701,8 @@ pub fn emergency_shell() -> ! {
     let Some(shell) = shell else {
         // Nothing to run. Hold the console rather than exit, so the error
         // above stays on screen instead of being replaced by a panic.
-        eprintln!("stormnetboot-init: no shell in this initramfs; holding the console");
-        loop {
-            std::thread::sleep(Duration::from_secs(3600));
-        }
+        hold("no shell in this initramfs - nothing left to hand you. \
+             This is a build fault: busybox should be at /bin/sh");
     };
 
     loop {
@@ -696,12 +722,7 @@ pub fn emergency_shell() -> ! {
         }
         match cmd.status() {
             Ok(st) => eprintln!("stormnetboot-init: shell exited ({st}); starting another"),
-            Err(e) => {
-                eprintln!("stormnetboot-init: cannot start {shell}: {e}; holding the console");
-                loop {
-                    std::thread::sleep(Duration::from_secs(3600));
-                }
-            }
+            Err(e) => hold(&format!("cannot start {shell}: {e}")),
         }
         // A shell that dies instantly in a loop is a busy-wait on the console.
         std::thread::sleep(Duration::from_millis(500));
