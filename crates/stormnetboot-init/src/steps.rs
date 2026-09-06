@@ -648,18 +648,63 @@ impl ExecReplace for Command {
 }
 
 /// Hand the operator a shell rather than panicking the kernel.
-pub fn emergency_shell() {
+/// Hand the operator a shell and never come back.
+///
+/// `-> !` is the contract, not a decoration. This used to run the shell and
+/// `return`, which looks right and is not: as PID 1 with no controlling
+/// terminal the shell reads EOF and exits at once, `emergency_shell` returned,
+/// `main` returned `FAILURE`, and the kernel panicked with
+/// `Attempted to kill init! exitcode=0x00000100` — replacing the console with
+/// a panic screen and erasing the message this function exists to show. That
+/// is what an R230 did on stormcos-sno 10.29.
+///
+/// So: attach the child to `/dev/console`, because stdio inherited from PID 1
+/// in an initramfs is not a terminal and a shell on it is unusable; and when
+/// it exits — deliberately or immediately — say so and start another. An
+/// operator typing `exit` should get another prompt, not a panicked machine.
+pub fn emergency_shell() -> ! {
     eprintln!("stormnetboot-init: dropping to a shell; the boot cannot continue");
-    for shell in ["/bin/sh", "/bin/busybox"] {
-        if Path::new(shell).exists() {
-            let _ = Command::new(shell).status();
-            return;
+    eprintln!("stormnetboot-init: this shell is PID 1's child; exiting it starts another");
+
+    let shell = ["/bin/sh", "/bin/busybox", "/bin/ash"]
+        .into_iter()
+        .find(|s| Path::new(s).exists());
+
+    let Some(shell) = shell else {
+        // Nothing to run. Hold the console rather than exit, so the error
+        // above stays on screen instead of being replaced by a panic.
+        eprintln!("stormnetboot-init: no shell in this initramfs; holding the console");
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
         }
-    }
-    // No shell either. Sleep rather than exit: PID 1 exiting panics the
-    // kernel and scrolls the real error off the console.
+    };
+
     loop {
-        std::thread::sleep(Duration::from_secs(3600));
+        let mut cmd = Command::new(shell);
+        // A shell whose stdin is not a terminal exits on the first read. The
+        // console is the one thing a headless node definitely has.
+        if let Ok(tty) = std::fs::OpenOptions::new().read(true).write(true).open("/dev/console") {
+            let err = tty.try_clone().ok();
+            let out = tty.try_clone().ok();
+            cmd.stdin(tty);
+            if let Some(o) = out {
+                cmd.stdout(o);
+            }
+            if let Some(e) = err {
+                cmd.stderr(e);
+            }
+        }
+        match cmd.status() {
+            Ok(st) => eprintln!("stormnetboot-init: shell exited ({st}); starting another"),
+            Err(e) => {
+                eprintln!("stormnetboot-init: cannot start {shell}: {e}; holding the console");
+                loop {
+                    std::thread::sleep(Duration::from_secs(3600));
+                }
+            }
+        }
+        // A shell that dies instantly in a loop is a busy-wait on the console.
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 

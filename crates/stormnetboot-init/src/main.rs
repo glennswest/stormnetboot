@@ -17,18 +17,25 @@ mod media;
 mod report;
 mod steps;
 
-use std::process::ExitCode;
-
 use crate::{cmdline::BootParams, report::Reporter};
 
-fn main() -> ExitCode {
+/// PID 1 has exactly one way to finish: `switch_root`. Every other path holds
+/// the console.
+///
+/// Returning from here — with any code — panics the kernel and replaces the
+/// console with a panic screen, which erases the diagnostic that would say
+/// why. `-> !` makes that a compile error rather than a discipline.
+fn main() -> ! {
     // Log to the console the way an initramfs must: no subscriber machinery,
     // no files, just stdout, which is the kernel console at this point.
     let cmdline = match steps::read_cmdline() {
         Ok(raw) => raw,
         Err(err) => {
+            // Not fatal in the "give up" sense: a shell can read the command
+            // line by hand, and someone standing at the console can do more
+            // with a prompt than with a panic.
             eprintln!("stormnetboot-init: cannot read /proc/cmdline: {err}");
-            return ExitCode::FAILURE;
+            steps::emergency_shell();
         }
     };
 
@@ -36,14 +43,20 @@ fn main() -> ExitCode {
     let reporter = Reporter::new(params.report_url.clone(), params.mac.clone());
 
     match steps::run(&params, &reporter) {
-        Ok(()) => ExitCode::SUCCESS,
+        // `run` ends in switch_root, which never returns. Reaching here means
+        // it finished without handing over, which is itself a failure.
+        Ok(()) => {
+            eprintln!("stormnetboot-init: boot finished without switch_root; nothing left to do");
+            steps::emergency_shell();
+        }
         Err(err) => {
             eprintln!("stormnetboot-init: {err:#}");
+            // What it was working from, because the next person reading this
+            // console has nothing else: the panic screen used to take even
+            // this away.
+            eprintln!("stormnetboot-init: cmdline was: {cmdline}");
             reporter.failed(&format!("{err:#}"));
-            // Do not exit: PID 1 exiting panics the kernel and the operator
-            // loses the message they need. Hand them a shell instead.
             steps::emergency_shell();
-            ExitCode::FAILURE
         }
     }
 }

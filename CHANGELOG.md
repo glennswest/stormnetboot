@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### 2026-09-06
+- **fix(init): PID 1 never returns.** `emergency_shell` ran the shell and returned, which looks right and is not: as PID 1 with no controlling terminal the shell reads EOF and exits at once, so the function returned, `main` returned `FAILURE`, and the kernel panicked with `Attempted to kill init! exitcode=0x00000100` — replacing the console with a panic screen and erasing the message the shell existed to show. An R230 did exactly this on stormcos-sno 10.29, and the underlying failure is still unknown because of it. `emergency_shell` is now `-> !`: it attaches the child to `/dev/console` (stdio inherited from PID 1 in an initramfs is not a terminal, and a shell on it is unusable), and when the shell exits it says so and starts another. `main` is `-> !` too, so returning is a compile error rather than a discipline, and the failure path prints the command line it was working from.
+
+### 2026-09-06
 - **feat(initramfs): CPU microcode ships in the netboot initramfs.** An uncompressed cpio holding `kernel/x86/microcode/{GenuineIntel,AuthenticAMD}.bin` now leads the archive, which is the only way to hand the kernel microcode before it brings up the other CPUs. Without it a node runs whatever its BIOS shipped for the life of the machine — the R230 this was built for reported `x86/CPU: Running old microcode` against a BIOS dated 31 Jan 2018, with MDS, TAA, SRBDS, MMIO Stale Data and GDS all `Vulnerable ... no microcode`, every one of them shipped after that BIOS. Matches what `stormblock/scripts/build-stormblock-initramfs.sh` does, so moving a golden from the shell init to `stormnetboot-init` does not silently lose it.
 
 ### 2026-09-02
