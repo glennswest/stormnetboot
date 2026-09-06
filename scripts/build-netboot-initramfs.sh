@@ -115,8 +115,48 @@ chmod 0755 "$ROOT/usr/share/udhcpc/default.script"
 echo 'ublk[bc].* 0:0 0660' > "$ROOT/etc/mdev.conf"
 
 mkdir -p "$(dirname "$OUTPUT")"
+
+# CPU microcode, as an uncompressed cpio ahead of the real one.
+#
+# The kernel applies microcode before it brings up the other CPUs, and the only
+# way to hand it any that early is a plain cpio at the front of the initramfs
+# holding kernel/x86/microcode/{GenuineIntel,AuthenticAMD}.bin. It must be
+# uncompressed and it must be first; the kernel consumes it and hands the
+# remainder on, so nothing else here changes.
+#
+# Without it a node runs whatever its BIOS shipped, for the life of the
+# machine. The R230 this was written for reported "x86/CPU: Running old
+# microcode" against a BIOS dated 31 Jan 2018, with MDS, TAA, SRBDS, MMIO
+# Stale Data and GDS all "Vulnerable ... no microcode" — five mitigations
+# shipped after that BIOS. Updating firmware fixes one machine once; this
+# fixes every node that boots the image.
+#
+# Skipped with a warning when the build host has none: an image without
+# microcode still boots, and a build that stops for a missing firmware package
+# helps nobody.
+UCODE="$ROOT.ucode"
+rm -rf "$UCODE"; mkdir -p "$UCODE/kernel/x86/microcode"
+ucode_found=""
+if ls /lib/firmware/intel-ucode/* >/dev/null 2>&1; then
+    cat /lib/firmware/intel-ucode/* > "$UCODE/kernel/x86/microcode/GenuineIntel.bin"
+    ucode_found="$ucode_found Intel($(ls /lib/firmware/intel-ucode | wc -l) revisions)"
+fi
+if ls /lib/firmware/amd-ucode/*.bin >/dev/null 2>&1; then
+    cat /lib/firmware/amd-ucode/*.bin > "$UCODE/kernel/x86/microcode/AuthenticAMD.bin"
+    ucode_found="$ucode_found AMD"
+fi
+
 say "packing $OUTPUT"
-(cd "$ROOT" && find . | cpio -o -H newc --quiet) | zstd -19 -T0 -q -f -o "$OUTPUT"
+if [[ -n "$ucode_found" ]]; then
+    say "early microcode:$ucode_found"
+    (cd "$UCODE" && find . | cpio -o -H newc --quiet) > "$OUTPUT"
+else
+    say "WARNING: no CPU microcode on this build host — nodes will run whatever"
+    say "         their BIOS shipped. Install microcode_ctl and amd-ucode-firmware."
+    : > "$OUTPUT"
+fi
+(cd "$ROOT" && find . | cpio -o -H newc --quiet) | zstd -19 -T0 -q >> "$OUTPUT"
+rm -rf "$UCODE"
 
 say "built $(du -h "$OUTPUT" | cut -f1) at $OUTPUT"
 say "publish it as the initramfs member of a boot pallet:"

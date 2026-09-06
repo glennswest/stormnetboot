@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### 2026-09-06
+- **feat(initramfs): CPU microcode ships in the netboot initramfs.** An uncompressed cpio holding `kernel/x86/microcode/{GenuineIntel,AuthenticAMD}.bin` now leads the archive, which is the only way to hand the kernel microcode before it brings up the other CPUs. Without it a node runs whatever its BIOS shipped for the life of the machine — the R230 this was built for reported `x86/CPU: Running old microcode` against a BIOS dated 31 Jan 2018, with MDS, TAA, SRBDS, MMIO Stale Data and GDS all `Vulnerable ... no microcode`, every one of them shipped after that BIOS. Matches what `stormblock/scripts/build-stormblock-initramfs.sh` does, so moving a golden from the shell init to `stormnetboot-init` does not silently lose it.
+
 ### 2026-09-02
 - **fix(media):** `build-boot-media.sh` died with no message once the UKI got
   large. Three `objdump | awk ... exit` pipelines closed the pipe before
